@@ -696,8 +696,12 @@ const IS_MAC =
   /Mac|iPhone|iPad/.test(navigator.userAgent);
 
 function isTerminalCopy(e: KeyboardEvent): boolean {
+  if (IS_MAC) {
+    return (
+      e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey && e.code === "KeyC"
+    );
+  }
   return (
-    !IS_MAC &&
     e.ctrlKey &&
     e.shiftKey &&
     !e.altKey &&
@@ -707,8 +711,12 @@ function isTerminalCopy(e: KeyboardEvent): boolean {
 }
 
 function isTerminalPaste(e: KeyboardEvent): boolean {
+  if (IS_MAC) {
+    return (
+      e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey && e.code === "KeyV"
+    );
+  }
   return (
-    !IS_MAC &&
     e.ctrlKey &&
     e.shiftKey &&
     !e.altKey &&
