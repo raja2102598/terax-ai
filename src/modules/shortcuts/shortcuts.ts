@@ -32,7 +32,9 @@ export type ShortcutId =
   | "settings.open"
   | "sidebar.toggle"
   | "editor.undo"
-  | "editor.redo";
+  | "editor.redo"
+  | "terminal.copy"
+  | "terminal.paste";
 
 export type ShortcutGroup =
   | "General"
@@ -42,7 +44,8 @@ export type ShortcutGroup =
   | "Search"
   | "AI"
   | "View"
-  | "Editor";
+  | "Editor"
+  | "Terminal";
 
 export type KeyBinding = {
   key: string;
@@ -126,7 +129,7 @@ export const SHORTCUTS: Shortcut[] = [
     label: "Focus previous pane",
     group: "Panes",
     defaultBindings: [{ [MOD_PROP]: true, key: "[" }],
-  },  
+  },
   {
     id: "pane.source",
     label: "Toggle source panel",
@@ -245,6 +248,25 @@ export const SHORTCUTS: Shortcut[] = [
     group: "Editor",
     defaultBindings: [{ [MOD_PROP]: true, key: "y" }],
   },
+  // Terminal Copy and Paste shortcuts
+  {
+    id: "terminal.copy",
+    label: "Copy selection",
+    group: "Terminal",
+    defaultBindings: [
+      { ctrl: true, shift: true, key: "c" }, // For Linux & Windows: Ctrl+Shift+C
+      { meta: true, key: "c" }, // For macOS: Cmd+C
+    ],
+  },
+  {
+    id: "terminal.paste",
+    label: "Paste from clipboard",
+    group: "Terminal",
+    defaultBindings: [
+      { ctrl: true, shift: true, key: "v" }, // For Linux & Windows: Ctrl+Shift+V
+      { meta: true, key: "v" }, // For macOS: Cmd+V
+    ],
+  },
 ];
 
 export const SHORTCUT_GROUPS: ShortcutGroup[] = [
@@ -256,6 +278,7 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
   "Search",
   "AI",
   "Editor",
+  "Terminal",
 ];
 
 /**
@@ -264,7 +287,7 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
 export function matchBinding(
   e: KeyboardEvent,
   binding: KeyBinding,
-  id?: ShortcutId
+  id?: ShortcutId,
 ): boolean {
   const eventKey = e.key.toLowerCase();
   const bindingKey = binding.key.toLowerCase();
