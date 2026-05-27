@@ -8,6 +8,7 @@ import { SerializeAddon } from "@xterm/addon-serialize";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
+import { readClipboardText, writeClipboardText } from "./clipboard";
 import {
   terminalDeleteSequence,
   terminalLineNavigationSequence,
@@ -159,6 +160,17 @@ function createSlot(): Slot {
 
   attachWebgl(slot);
 
+  const onPaste = (event: ClipboardEvent) => {
+    if (slot.currentLeafId === null) return;
+    if (!adapter?.resolveLeaf(slot.currentLeafId)) return;
+    void readClipboardText(event).then((text) => {
+      if (!text) return;
+      event.preventDefault();
+      slot.term.paste(text);
+    });
+  };
+  term.element?.addEventListener("paste", onPaste, true);
+
   term.attachCustomKeyEventHandler((event) => {
     const leafId = slot.currentLeafId;
     if (leafId === null) return false;
@@ -192,19 +204,16 @@ function createSlot(): Slot {
     if (isTerminalCopy(event)) {
       if (event.type === "keydown" && slot.term.hasSelection()) {
         const sel = slot.term.getSelection();
-        if (sel) void navigator.clipboard.writeText(sel).catch(() => {});
+        if (sel) void writeClipboardText(sel).catch(() => {});
       }
       event.preventDefault();
       return false;
     }
     if (isTerminalPaste(event)) {
       if (event.type === "keydown") {
-        void navigator.clipboard
-          .readText()
-          .then((text) => {
-            if (text) slot.term.paste(text);
-          })
-          .catch(() => {});
+        void readClipboardText().then((text) => {
+          if (text) slot.term.paste(text);
+        });
       }
       event.preventDefault();
       return false;
@@ -711,6 +720,15 @@ function isTerminalCopy(e: KeyboardEvent): boolean {
 }
 
 function isTerminalPaste(e: KeyboardEvent): boolean {
+  if (
+    e.key === "Insert" &&
+    e.shiftKey &&
+    !e.ctrlKey &&
+    !e.metaKey &&
+    !e.altKey
+  ) {
+    return true;
+  }
   if (IS_MAC) {
     return (
       e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey && e.code === "KeyV"
