@@ -13,7 +13,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { fmtShortcut, MOD_KEY } from "@/lib/platform";
+import { fmtShortcut, MOD_KEY, SHIFT_KEY } from "@/lib/platform";
 import { cn } from "@/lib/utils";
 import { fileIconUrl } from "@/modules/explorer/lib/iconResolver";
 import {
@@ -390,7 +390,11 @@ export function TabBar({
               <HugeiconsIcon icon={PlusSignIcon} size={14} strokeWidth={2} />
             </Button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="start" className="min-w-44">
+          <DropdownMenuContent
+            align="start"
+            className="min-w-44"
+            onCloseAutoFocus={(e) => e.preventDefault()}
+          >
             <DropdownMenuItem onSelect={() => onNew()}>
               <HugeiconsIcon
                 icon={ComputerTerminal02Icon}
@@ -408,8 +412,10 @@ export function TabBar({
                 size={14}
                 strokeWidth={1.75}
               />
-              <span className="flex-1">Block terminal</span>
-              <span className="text-xs text-muted-foreground">beta</span>
+              <span className="flex-1">Blocks</span>
+              <span className="text-xs text-muted-foreground">
+                {fmtShortcut(MOD_KEY, SHIFT_KEY, "T")}
+              </span>
             </DropdownMenuItem>
             <DropdownMenuItem onSelect={() => onNewPrivate()}>
               <HugeiconsIcon
