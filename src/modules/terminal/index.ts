@@ -6,11 +6,20 @@ export {
   leafHasForegroundProcess,
   leafIdForPty,
   navigateFocusedBlocks,
+  ptyIdForLeaf,
   respawnSession,
   whenSessionReady,
   writeToSession,
 } from "./lib/useTerminalSession";
-export { useTerminalFileDrop } from "./lib/useTerminalFileDrop";
+export {
+  type AgentTabStatus,
+  tabAgentStatus,
+  useAgentActivityStore,
+} from "./lib/agentActivity";
+export {
+  type TerminalPathDropTarget,
+  useTerminalFileDrop,
+} from "./lib/useTerminalFileDrop";
 export {
   findLeafCwd,
   hasLeaf,
