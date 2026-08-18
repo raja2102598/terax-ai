@@ -29,6 +29,8 @@ export const DEFAULT_THEME_ID = "terax-default";
 
 export type BackgroundKind = "none" | "image";
 
+export type TerminalCursorStyle = "bar" | "block" | "underline";
+
 export const EDITOR_THEMES = [
   "kanagawa",
   "kanagawa-lotus",
@@ -151,16 +153,19 @@ export type Preferences = {
   recentModelIds: string[];
   vimMode: boolean;
   editorWordWrap: boolean;
+  editorWordWrapColumn: number;
   showHidden: boolean;
   explorerGitDecorations: boolean;
   terminalWebglEnabled: boolean;
   terminalCursorBlink: boolean;
+  terminalCursorStyle: TerminalCursorStyle;
   terminalFontFamily: string;
   terminalFontWeight: string;
   terminalShell: string;
   terminalLetterSpacing: number;
   terminalFontSize: number;
   terminalScrollback: number;
+  confirmCloseRunningTerminal: boolean;
   lastWslDistro: string | null;
   zoomLevel: number;
   agentNotifications: boolean;
@@ -242,17 +247,20 @@ const KEY_FAVORITE_MODELS = "favoriteModelIds";
 const KEY_RECENT_MODELS = "recentModelIds";
 const KEY_VIM_MODE = "vimMode";
 const KEY_EDITOR_WORD_WRAP = "editorWordWrap";
+const KEY_EDITOR_WORD_WRAP_COLUMN = "editorWordWrapColumn";
 const KEY_SHOW_HIDDEN = "showHidden";
 const LEGACY_KEY_SHOW_HIDDEN_DIRS = "showHiddenDirectories";
 const KEY_EXPLORER_GIT_DECORATIONS = "explorerGitDecorations";
 const KEY_TERMINAL_WEBGL_ENABLED = "terminalWebglEnabled";
 const KEY_TERMINAL_CURSOR_BLINK = "terminalCursorBlink";
+const KEY_TERMINAL_CURSOR_STYLE = "terminalCursorStyle";
 const KEY_TERMINAL_FONT_FAMILY = "terminalFontFamily";
 const KEY_TERMINAL_FONT_WEIGHT = "terminalFontWeight";
 const KEY_TERMINAL_SHELL = "terminalShell";
 const KEY_TERMINAL_LETTER_SPACING = "terminalLetterSpacing";
 const KEY_TERMINAL_FONT_SIZE = "terminalFontSize";
 const KEY_TERMINAL_SCROLLBACK = "terminalScrollback";
+const KEY_CONFIRM_CLOSE_RUNNING_TERMINAL = "confirmCloseRunningTerminal";
 const KEY_LAST_WSL_DISTRO = "lastWslDistro";
 const KEY_ZOOM_LEVEL = "zoomLevel";
 const KEY_AGENT_NOTIFICATIONS = "agentNotifications";
@@ -284,6 +292,10 @@ export const EDITOR_FONT_SIZE_MAX = 32;
 export const EDITOR_FONT_SIZES = [
   10, 11, 12, 13, 14, 15, 16, 18, 20, 22, 24,
 ] as const;
+
+export const EDITOR_WORD_WRAP_COLUMN_DEFAULT = 80;
+export const EDITOR_WORD_WRAP_COLUMN_MIN = 20;
+export const EDITOR_WORD_WRAP_COLUMN_MAX = 500;
 
 export const TERMINAL_SCROLLBACK_DEFAULT = 2000;
 export const TERMINAL_SCROLLBACK_MIN = 200;
@@ -327,16 +339,19 @@ export const DEFAULT_PREFERENCES: Preferences = {
   recentModelIds: [],
   vimMode: false,
   editorWordWrap: false,
+  editorWordWrapColumn: EDITOR_WORD_WRAP_COLUMN_DEFAULT,
   showHidden: false,
   explorerGitDecorations: true,
   terminalWebglEnabled: true,
   terminalCursorBlink: false,
+  terminalCursorStyle: "bar",
   terminalFontFamily: "",
   terminalFontWeight: "normal",
   terminalShell: "",
   terminalLetterSpacing: 0,
   terminalFontSize: TERMINAL_FONT_SIZE_DEFAULT,
   terminalScrollback: TERMINAL_SCROLLBACK_DEFAULT,
+  confirmCloseRunningTerminal: true,
   lastWslDistro: null,
   zoomLevel: 1.0,
   agentNotifications: true,
@@ -471,6 +486,10 @@ export async function loadPreferences(): Promise<Preferences> {
     vimMode: get<boolean>(KEY_VIM_MODE) ?? DEFAULT_PREFERENCES.vimMode,
     editorWordWrap:
       get<boolean>(KEY_EDITOR_WORD_WRAP) ?? DEFAULT_PREFERENCES.editorWordWrap,
+    editorWordWrapColumn: clampEditorWordWrapColumn(
+      get<number>(KEY_EDITOR_WORD_WRAP_COLUMN) ??
+        DEFAULT_PREFERENCES.editorWordWrapColumn,
+    ),
     showHidden:
       get<boolean>(KEY_SHOW_HIDDEN) ??
       get<boolean>(LEGACY_KEY_SHOW_HIDDEN_DIRS) ??
@@ -484,6 +503,9 @@ export async function loadPreferences(): Promise<Preferences> {
     terminalCursorBlink:
       get<boolean>(KEY_TERMINAL_CURSOR_BLINK) ??
       DEFAULT_PREFERENCES.terminalCursorBlink,
+    terminalCursorStyle: coerceTerminalCursorStyle(
+      get<unknown>(KEY_TERMINAL_CURSOR_STYLE),
+    ),
     terminalFontFamily:
       get<string>(KEY_TERMINAL_FONT_FAMILY) ??
       DEFAULT_PREFERENCES.terminalFontFamily,
@@ -503,6 +525,9 @@ export async function loadPreferences(): Promise<Preferences> {
       get<number>(KEY_TERMINAL_SCROLLBACK) ??
         DEFAULT_PREFERENCES.terminalScrollback,
     ),
+    confirmCloseRunningTerminal:
+      get<boolean>(KEY_CONFIRM_CLOSE_RUNNING_TERMINAL) ??
+      DEFAULT_PREFERENCES.confirmCloseRunningTerminal,
     lastWslDistro:
       get<string | null>(KEY_LAST_WSL_DISTRO) ??
       DEFAULT_PREFERENCES.lastWslDistro,
@@ -742,6 +767,21 @@ export async function setEditorWordWrap(value: boolean): Promise<void> {
   await writePref(KEY_EDITOR_WORD_WRAP, value);
 }
 
+export function clampEditorWordWrapColumn(value: number): number {
+  if (!Number.isFinite(value)) return EDITOR_WORD_WRAP_COLUMN_DEFAULT;
+  return Math.min(
+    EDITOR_WORD_WRAP_COLUMN_MAX,
+    Math.max(EDITOR_WORD_WRAP_COLUMN_MIN, Math.round(value)),
+  );
+}
+
+export async function setEditorWordWrapColumn(value: number): Promise<void> {
+  await writePref(
+    KEY_EDITOR_WORD_WRAP_COLUMN,
+    clampEditorWordWrapColumn(value),
+  );
+}
+
 export async function setShowHidden(value: boolean): Promise<void> {
   await writePref(KEY_SHOW_HIDDEN, value);
 }
@@ -756,6 +796,16 @@ export async function setTerminalWebglEnabled(value: boolean): Promise<void> {
 
 export async function setTerminalCursorBlink(value: boolean): Promise<void> {
   await writePref(KEY_TERMINAL_CURSOR_BLINK, value);
+}
+
+export function coerceTerminalCursorStyle(value: unknown): TerminalCursorStyle {
+  return value === "bar" || value === "block" || value === "underline"
+    ? value
+    : DEFAULT_PREFERENCES.terminalCursorStyle;
+}
+
+export async function setTerminalCursorStyle(value: unknown): Promise<void> {
+  await writePref(KEY_TERMINAL_CURSOR_STYLE, coerceTerminalCursorStyle(value));
 }
 
 export async function setTerminalFontFamily(value: string): Promise<void> {
@@ -804,6 +854,12 @@ function clampScrollback(value: number): number {
 
 export async function setTerminalScrollback(value: number): Promise<void> {
   await writePref(KEY_TERMINAL_SCROLLBACK, clampScrollback(value));
+}
+
+export async function setConfirmCloseRunningTerminal(
+  value: boolean,
+): Promise<void> {
+  await writePref(KEY_CONFIRM_CLOSE_RUNNING_TERMINAL, value);
 }
 
 export async function setLastWslDistro(value: string | null): Promise<void> {
@@ -931,16 +987,19 @@ export async function onPreferencesChange(
     [KEY_RECENT_MODELS]: "recentModelIds",
     [KEY_VIM_MODE]: "vimMode",
     [KEY_EDITOR_WORD_WRAP]: "editorWordWrap",
+    [KEY_EDITOR_WORD_WRAP_COLUMN]: "editorWordWrapColumn",
     [KEY_SHOW_HIDDEN]: "showHidden",
     [KEY_EXPLORER_GIT_DECORATIONS]: "explorerGitDecorations",
     [KEY_TERMINAL_WEBGL_ENABLED]: "terminalWebglEnabled",
     [KEY_TERMINAL_CURSOR_BLINK]: "terminalCursorBlink",
+    [KEY_TERMINAL_CURSOR_STYLE]: "terminalCursorStyle",
     [KEY_TERMINAL_FONT_FAMILY]: "terminalFontFamily",
     [KEY_TERMINAL_FONT_WEIGHT]: "terminalFontWeight",
     [KEY_TERMINAL_SHELL]: "terminalShell",
     [KEY_TERMINAL_LETTER_SPACING]: "terminalLetterSpacing",
     [KEY_TERMINAL_FONT_SIZE]: "terminalFontSize",
     [KEY_TERMINAL_SCROLLBACK]: "terminalScrollback",
+    [KEY_CONFIRM_CLOSE_RUNNING_TERMINAL]: "confirmCloseRunningTerminal",
     [KEY_LAST_WSL_DISTRO]: "lastWslDistro",
     [KEY_ZOOM_LEVEL]: "zoomLevel",
     [KEY_AGENT_NOTIFICATIONS]: "agentNotifications",

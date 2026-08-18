@@ -31,6 +31,7 @@ import {
   acquireSlot,
   applyBackgroundActive,
   applyCursorBlink,
+  applyCursorStyle,
   applyLetterSpacing,
   applyTerminalFont,
   applyTheme as applyPoolTheme,
@@ -569,6 +570,7 @@ async function openPtyForSession(
     cwd,
     s.blocks,
     usePreferencesStore.getState().terminalShell || undefined,
+    leafId,
   );
   // Only resize if the bound dims changed during the spawn: a same-size
   // ResizePseudoConsole during conhost warmup is a known ConPTY trigger for
@@ -924,6 +926,11 @@ export function useTerminalSession({
   useEffect(() => {
     applyCursorBlink(cursorBlink);
   }, [cursorBlink]);
+
+  const cursorStyle = usePreferencesStore((p) => p.terminalCursorStyle);
+  useEffect(() => {
+    applyCursorStyle(cursorStyle);
+  }, [cursorStyle]);
 
   const bgActive = usePreferencesStore(
     (p) => p.backgroundKind === "image" && !!p.backgroundImageId,
