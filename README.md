@@ -1,9 +1,3 @@
-<!--
-AI-ASSISTED: Cursor
-PROMPT: Resolve merge conflicts and keep fork branding while including upstream README updates
-ACCEPTED-BY: raja
--->
-
 <div align="center">
   <img src="public/logo.png" width="144" height="144" alt="Terax" />
   <h1>Terax</h1>
