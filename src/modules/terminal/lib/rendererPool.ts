@@ -21,11 +21,9 @@ import {
   resetImeBridge,
   transitionImeBridgeOwner,
 } from "./imeBridge";
+import { AutoSuggestAddon } from "./AutoSuggestAddon";
+import { readClipboardText, writeClipboardText } from "./clipboard";
 import { terminalReadlineSequence } from "./keymap";
-import {
-  readTerminalClipboard,
-  writeTerminalClipboard,
-} from "./terminalClipboard";
 import { createTerminalLinkHandler } from "./terminalLinks";
 import { pasteIntoTerminal } from "./terminalPaste";
 
@@ -83,6 +81,7 @@ export type Slot = {
   lastH: number;
   lastUsedAt: number;
   imeState: ImeBridgeState;
+  autoSuggest: AutoSuggestAddon;
 };
 
 const slots: Slot[] = [];
@@ -228,9 +227,11 @@ function createSlot(): Slot {
   const fitAddon = new FitAddon();
   const searchAddon = new SearchAddon();
   const serializeAddon = new SerializeAddon();
+  const autoSuggest = new AutoSuggestAddon();
   term.loadAddon(fitAddon);
   term.loadAddon(searchAddon);
   term.loadAddon(serializeAddon);
+  term.loadAddon(autoSuggest);
   term.loadAddon(
     new WebLinksAddon((_e, uri) => {
       void openExternalUrl(uri, () => term.focus());
@@ -268,11 +269,8 @@ function createSlot(): Slot {
     lastH: 0,
     lastUsedAt: 0,
     imeState: createImeBridgeState(),
+    autoSuggest,
   };
-
-  // AI-ASSISTED: Cursor
-  // PROMPT: Resolve merge conflict by accepting upstream IME bridge fix
-  // ACCEPTED-BY: raja
 
   // Some WKWebView builds bypass xterm's composition events. The pure bridge
   // repairs that path and stands down when native composition is observed.
@@ -341,6 +339,17 @@ function createSlot(): Slot {
       if (event.type === "keydown") bridge.writeToPty("\x1b\r");
       return false;
     }
+    if (
+      event.key === "Tab" &&
+      !event.ctrlKey &&
+      !event.metaKey &&
+      !event.altKey &&
+      event.type === "keydown" &&
+      slot.autoSuggest.acceptSuggestion((data) => bridge.writeToPty(data))
+    ) {
+      event.preventDefault();
+      return false;
+    }
     if (event.key === "e" && (IS_MAC ? event.metaKey : event.ctrlKey) && !event.shiftKey && !event.altKey) {
       if (event.type === "keydown") {
         const draft = bridge.getDraft();
@@ -363,7 +372,7 @@ function createSlot(): Slot {
     if (isTerminalCopy(event)) {
       if (event.type === "keydown" && slot.term.hasSelection()) {
         const sel = slot.term.getSelection();
-        if (sel) void writeTerminalClipboard(sel);
+        if (sel) void writeClipboardText(sel);
       }
       event.preventDefault();
       return false;
@@ -371,7 +380,7 @@ function createSlot(): Slot {
     if (isTerminalPaste(event)) {
       if (event.type === "keydown") {
         const targetLeafId = slot.currentLeafId;
-        void readTerminalClipboard().then((text) => {
+        void readClipboardText().then((text) => {
           if (text && slot.currentLeafId === targetLeafId)
             slot.term.paste(text);
         });
@@ -534,7 +543,7 @@ function bindSlot(slot: Slot, p: AcquireParams): void {
   }
 
   slot.term.options.disableStdin = p.shellExited;
-
+  if (!fast) slot.autoSuggest.resetInput();
 
   if (!fast) {
     slot.term.clear();

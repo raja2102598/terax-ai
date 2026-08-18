@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { relativePath } from "./contextActions";
+import { isExtractableArchive, relativePath } from "./contextActions";
 
 describe("relativePath", () => {
   it("returns '.' when the path is the root itself", () => {
@@ -16,5 +16,14 @@ describe("relativePath", () => {
 
   it("returns an unrelated path unchanged", () => {
     expect(relativePath("/a/b", "/x/y")).toBe("/x/y");
+  });
+});
+
+describe("isExtractableArchive", () => {
+  it("accepts zip, tar.gz, and tgz", () => {
+    expect(isExtractableArchive("/tmp/a.zip")).toBe(true);
+    expect(isExtractableArchive("/tmp/a.tar.gz")).toBe(true);
+    expect(isExtractableArchive("/tmp/a.tgz")).toBe(true);
+    expect(isExtractableArchive("/tmp/a.csv")).toBe(false);
   });
 });

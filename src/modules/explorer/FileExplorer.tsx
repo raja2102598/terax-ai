@@ -15,6 +15,7 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { useVirtualizer } from "@tanstack/react-virtual";
+import { toast } from "sonner";
 import {
   forwardRef,
   memo,
@@ -31,6 +32,8 @@ import { EntryRow, PendingRow, StatusRow, type RowActions } from "./TreeRow";
 import { InlineInput } from "./InlineInput";
 import {
   copyToClipboard,
+  extractArchive,
+  isExtractableArchive,
   relativePath,
   revealInFinder,
 } from "./lib/contextActions";
@@ -756,6 +759,18 @@ export const FileExplorer = memo(
                   >
                     Copy Relative Path
                   </ContextMenuItem>
+                  {!menuTarget.isDir && isExtractableArchive(menuTarget.path) && (
+                    <ContextMenuItem
+                      className={COMPACT_ITEM}
+                      onSelect={() =>
+                        void extractArchive(menuTarget.path).catch((err) =>
+                          toast.error(`Extract failed: ${String(err)}`),
+                        )
+                      }
+                    >
+                      Extract Here
+                    </ContextMenuItem>
+                  )}
                   <ContextMenuSeparator />
                   <ContextMenuItem
                     className={COMPACT_ITEM}

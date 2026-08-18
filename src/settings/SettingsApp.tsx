@@ -8,6 +8,7 @@ import {
   InformationCircleIcon,
   KeyboardIcon,
   PaintBoardIcon,
+  Search01Icon,
   Settings01Icon,
   SourceCodeIcon,
   UserMultiple02Icon,
@@ -21,6 +22,7 @@ import { EditorSection } from "./sections/EditorSection";
 import { GeneralSection } from "./sections/GeneralSection";
 import { ModelsSection } from "./sections/ModelsSection";
 import { ShortcutsSection } from "./sections/ShortcutsSection";
+import { SuggestionsSection } from "./sections/SuggestionsSection";
 import { ThemesSection } from "./sections/ThemesSection";
 
 const TABS: {
@@ -53,6 +55,12 @@ const TABS: {
     icon: KeyboardIcon,
     component: ShortcutsSection,
   },
+  {
+    id: "suggestions",
+    label: "Suggestions",
+    icon: Search01Icon,
+    component: SuggestionsSection,
+  },
   { id: "models", label: "Models", icon: AiScanIcon, component: ModelsSection },
   {
     id: "agents",
@@ -73,6 +81,7 @@ const VALID_TABS: SettingsTab[] = [
   "editor",
   "themes",
   "shortcuts",
+  "suggestions",
   "models",
   "agents",
   "about",

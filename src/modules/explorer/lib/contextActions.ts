@@ -1,4 +1,6 @@
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { invoke } from "@tauri-apps/api/core";
+import { currentWorkspaceEnv } from "@/modules/workspace";
 
 export async function copyToClipboard(text: string): Promise<void> {
   try {
@@ -20,4 +22,15 @@ export async function revealInFinder(path: string): Promise<void> {
   } catch (e) {
     console.error("revealItemInDir failed:", e);
   }
+}
+
+export function isExtractableArchive(path: string): boolean {
+  const lower = path.toLowerCase();
+  return (
+    lower.endsWith(".zip") || lower.endsWith(".tar.gz") || lower.endsWith(".tgz")
+  );
+}
+
+export async function extractArchive(path: string): Promise<void> {
+  await invoke("fs_extract", { path, workspace: currentWorkspaceEnv() });
 }

@@ -1,9 +1,6 @@
 [package]
 name = "terax"
-# AI-ASSISTED: Cursor
-# PROMPT: Bump version to 0.10.1 for new release
-# ACCEPTED-BY: raja
-version = "0.10.1"
+version = "0.10.2"
 description = "Terax — an open-source AI-native terminal emulator"
 authors = ["raja2102598"]
 license = "Apache-2.0"
@@ -16,10 +13,7 @@ default-members = [".", "crates/terax-cli", "crates/terax-control-protocol"]
 resolver = "2"
 
 [workspace.package]
-# AI-ASSISTED: Cursor
-# PROMPT: Keep workspace version in sync with package version for release
-# ACCEPTED-BY: raja
-version = "0.10.1"
+version = "0.10.2"
 edition = "2021"
 license = "Apache-2.0"
 
