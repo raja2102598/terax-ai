@@ -51,6 +51,7 @@ import {
   poolSlotStats,
   refreshLeafSlot,
   releaseSlot,
+  resetAutoSuggestScope,
   setSlotFocused,
 } from "./rendererPool";
 import { useTerminalFont } from "./useTerminalFont";
@@ -351,6 +352,7 @@ function onLeafCommandState(leafId: number, running: boolean): void {
   const s = sessions.get(leafId);
   if (!s || s.commandRunning === running) return;
   s.commandRunning = running;
+  if (!running) resetAutoSuggestScope(leafId);
   if (!running) {
     scheduleHiddenRelease(leafId, s);
     return;

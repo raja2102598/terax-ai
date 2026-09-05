@@ -1,12 +1,17 @@
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import { emit, listen } from "@tauri-apps/api/event";
 import type { ITerminalAddon, Terminal } from "@xterm/xterm";
+import {
+  contextualMatch,
+  nextSuggestionScope,
+  type SuggestionScope,
+} from "./suggestionContext";
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-const STORAGE_KEY = "terax:cmd-history";
+const STORAGE_KEY = "terax:cmd-history:v2";
 const MAX_HISTORY = 500;
 
 /**
@@ -98,9 +103,13 @@ const BUILTIN_COMMANDS: readonly string[] = [
 // History store (Set-backed, persisted to localStorage)
 // ---------------------------------------------------------------------------
 
-function loadHistory(): Set<string> {
+function storageKey(session: string, scope: SuggestionScope): string {
+  return `${STORAGE_KEY}:${session}:${scope}`;
+}
+
+function loadHistory(session: string, scope: SuggestionScope): Set<string> {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = localStorage.getItem(storageKey(session, scope));
     if (!raw) return new Set<string>();
     const arr: unknown = JSON.parse(raw);
     if (!Array.isArray(arr)) return new Set<string>();
@@ -113,12 +122,16 @@ function loadHistory(): Set<string> {
   }
 }
 
-function saveHistory(history: Set<string>): void {
+function saveHistory(
+  session: string,
+  scope: SuggestionScope,
+  history: Set<string>,
+): void {
   try {
     // Trim to MAX_HISTORY (keep the most recent entries)
     const arr = Array.from(history);
     const trimmed = arr.length > MAX_HISTORY ? arr.slice(-MAX_HISTORY) : arr;
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(trimmed));
+    localStorage.setItem(storageKey(session, scope), JSON.stringify(trimmed));
   } catch {
     /* storage full or unavailable — silently ignore */
   }
@@ -131,6 +144,8 @@ function saveHistory(history: Set<string>): void {
 export class AutoSuggestAddon implements ITerminalAddon {
   private _terminal: Terminal | null = null;
   private _history: Set<string>;
+  private _sessionContext = "unbound";
+  private _scope: SuggestionScope = "shell";
 
   /** The text the user has typed on the current prompt line so far. */
   private _currentInput = "";
@@ -148,10 +163,10 @@ export class AutoSuggestAddon implements ITerminalAddon {
   private _unlistenClear: (() => void) | null = null;
 
   constructor() {
-    this._history = loadHistory();
+    this._history = loadHistory(this._sessionContext, this._scope);
     void listen("terax:clear-cmd-history", () => {
       this._history.clear();
-      saveHistory(this._history);
+      this._clearStoredHistory();
       this._updateSuggestion();
     }).then((un) => {
       this._unlistenClear = un;
@@ -208,6 +223,23 @@ export class AutoSuggestAddon implements ITerminalAddon {
     return this._activeSuggestion.slice(this._currentInput.length) || null;
   }
 
+  /** Bind a pooled renderer to one terminal's isolated suggestion history. */
+  setSessionContext(session: string): void {
+    if (session === this._sessionContext) return;
+    this._sessionContext = session;
+    this._scope = "shell";
+    this._history = loadHistory(session, this._scope);
+    this.resetInput();
+  }
+
+  /** Restore shell suggestions after an interactive child process exits. */
+  setShellScope(): void {
+    if (this._scope === "shell") return;
+    this._scope = "shell";
+    this._history = loadHistory(this._sessionContext, this._scope);
+    this.resetInput();
+  }
+
   /**
    * Accept the current suggestion: write the remainder to the PTY and
    * commit the full command to history. Returns true if a suggestion was
@@ -241,7 +273,12 @@ export class AutoSuggestAddon implements ITerminalAddon {
         this._history.delete(trimmed);
         this._history.add(trimmed);
         this._trimHistory();
-        saveHistory(this._history);
+        saveHistory(this._sessionContext, this._scope, this._history);
+        const nextScope = nextSuggestionScope(this._scope, trimmed);
+        if (nextScope !== this._scope) {
+          this._scope = nextScope;
+          this._history = loadHistory(this._sessionContext, this._scope);
+        }
       }
       this._currentInput = "";
       this._activeSuggestion = null;
@@ -283,7 +320,6 @@ export class AutoSuggestAddon implements ITerminalAddon {
 
     // Ignore other escape sequences (arrows, function keys, etc.)
     if (data.startsWith("\x1b") || data.charCodeAt(0) < 32) {
-      console.log("[AutoSuggest] Ignoring control sequence:", data.split('').map(c => c.charCodeAt(0)));
       this._activeSuggestion = null;
       this._hideOverlay();
       return;
@@ -291,7 +327,6 @@ export class AutoSuggestAddon implements ITerminalAddon {
 
     // Regular printable character(s)
     this._currentInput += data;
-    console.log("[AutoSuggest] Input updated:", this._currentInput);
     this._updateSuggestion();
   }
 
@@ -311,10 +346,13 @@ export class AutoSuggestAddon implements ITerminalAddon {
     const customSuggestions = usePreferencesStore.getState().terminalCustomSuggestions;
     const historyArr = Array.from(this._history).reverse();
 
-    const match =
-      customSuggestions.find((cmd) => cmd.startsWith(input) && cmd !== input) ??
-      historyArr.find((cmd) => cmd.startsWith(input) && cmd !== input) ??
-      BUILTIN_COMMANDS.find((cmd) => cmd.startsWith(input) && cmd !== input);
+    const match = contextualMatch(
+      input,
+      this._scope,
+      historyArr,
+      BUILTIN_COMMANDS,
+      customSuggestions,
+    );
 
     if (match) {
       this._activeSuggestion = match;
@@ -394,11 +432,6 @@ export class AutoSuggestAddon implements ITerminalAddon {
       color: fgColor,
     });
 
-    console.log("[AutoSuggest] Rendered overlay:", {
-      remainder, left: overlay.style.left, top: overlay.style.top,
-      cursorX, cursorY, cellWidth, cellHeight
-    });
-
     overlay.textContent = remainder;
   }
 
@@ -421,12 +454,22 @@ export class AutoSuggestAddon implements ITerminalAddon {
       removed++;
     }
   }
+
+  private _clearStoredHistory(): void {
+    for (let i = localStorage.length - 1; i >= 0; i--) {
+      const key = localStorage.key(i);
+      if (key?.startsWith(`${STORAGE_KEY}:`)) localStorage.removeItem(key);
+    }
+  }
 }
 
 /** Global helper to wipe history. */
 export async function clearTerminalHistory(): Promise<void> {
   // Clear localStorage for future launches
-  localStorage.removeItem(STORAGE_KEY);
+  for (let i = localStorage.length - 1; i >= 0; i--) {
+    const key = localStorage.key(i);
+    if (key?.startsWith(`${STORAGE_KEY}:`)) localStorage.removeItem(key);
+  }
   // Broadcast to all active addons to clear their memory caches
   await emit("terax:clear-cmd-history");
 }
