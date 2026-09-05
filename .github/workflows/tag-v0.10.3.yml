@@ -21,12 +21,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if git ls-remote --exit-code --tags origin refs/tags/v0.10.3 >/dev/null 2>&1; then
-            echo "v0.10.3 already exists"
-          else
-            git tag v0.10.3 "$GITHUB_SHA"
-            git push origin v0.10.3
-          fi
+          # Repoint the failed, release-less tag to the current default-branch
+          # commit so GitHub's GITHUB_TOKEN may create the release.
+          git tag -f v0.10.3 "$GITHUB_SHA"
+          git push --force origin refs/tags/v0.10.3
       - name: Start release build
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
