@@ -52,6 +52,7 @@ import {
   refreshLeafSlot,
   releaseSlot,
   resetAutoSuggestScope,
+  setAutoSuggestCommandContext,
   setSlotFocused,
 } from "./rendererPool";
 import { useTerminalFont } from "./useTerminalFont";
@@ -641,6 +642,8 @@ function bindLeafToSlot(leafId: number, s: Session): void {
             const set = blockViewportListeners.get(leafId);
             if (set) for (const l of set) l();
           },
+          onCommand: (command) =>
+            setAutoSuggestCommandContext(leafId, command),
         });
         s.blockDecorations = deco;
         const onGridFocus = () => {

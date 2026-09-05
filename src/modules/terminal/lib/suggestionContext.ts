@@ -1,15 +1,17 @@
-export type SuggestionScope = "shell" | "mongodb" | "mysql" | "postgres";
+export type SuggestionScope = "shell" | `app:${string}`;
 
-const CLIENTS: Record<string, SuggestionScope> = {
+const APP_ALIASES: Record<string, string> = {
   mongo: "mongodb",
   mongosh: "mongodb",
-  mysql: "mysql",
   mariadb: "mysql",
   psql: "postgres",
+  python3: "python",
+  ipython3: "ipython",
 };
 
-export const CONTEXT_COMMANDS: Record<SuggestionScope, readonly string[]> = {
-  shell: [],
+/** Optional starter vocabulary. Unknown applications still get isolated,
+ * learned history; this map only makes familiar REPLs useful immediately. */
+export const APP_COMMANDS: Record<string, readonly string[]> = {
   mongodb: [
     "show dbs",
     "show collections",
@@ -42,20 +44,50 @@ export const CONTEXT_COMMANDS: Record<SuggestionScope, readonly string[]> = {
     "SELECT * FROM ",
     "\\q",
   ],
+  "redis-cli": ["PING", "GET ", "SET ", "DEL ", "KEYS *", "INFO", "quit"],
+  sqlite3: [".tables", ".schema", ".databases", "SELECT * FROM ", ".quit"],
+  python: ["help(", "print(", "import ", "from ", "exit()"],
+  ipython: ["%history", "%timeit ", "%run ", "help(", "exit"],
+  node: ["console.log(", "const ", "let ", "require(", ".help", ".exit"],
 };
 
-/** Detect entering or leaving a well-known interactive database client. */
+const WRAPPERS = new Set(["command", "env", "nice", "nohup", "sudo"]);
+
+function executableOf(command: string): string | null {
+  const tokens = command.trim().split(/\s+/);
+  let index = 0;
+  while (index < tokens.length) {
+    const token = tokens[index];
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(token) || token.startsWith("-")) {
+      index++;
+      continue;
+    }
+    const executable = token.split(/[\\/]/).pop()?.toLowerCase() ?? "";
+    if (WRAPPERS.has(executable)) {
+      index++;
+      continue;
+    }
+    return executable || null;
+  }
+  return null;
+}
+
+/** Give every launched process a context. Shell integration resets this when
+ * the process finishes, so only interactive children have time to use it. */
 export function nextSuggestionScope(
   current: SuggestionScope,
   command: string,
 ): SuggestionScope {
-  const normalized = command.trim().replace(/^sudo\s+/, "");
+  const normalized = command.trim();
   if (current !== "shell") {
-    if (/^(exit|quit|\\q)\s*;?$/i.test(normalized)) return "shell";
+    if (/^(exit|exit\(\)|quit|\.exit|\.quit|\\q)\s*;?$/i.test(normalized)) {
+      return "shell";
+    }
     return current;
   }
-  const executable = normalized.split(/\s+/)[0]?.split(/[\\/]/).pop() ?? "";
-  return CLIENTS[executable.toLowerCase()] ?? "shell";
+  const executable = executableOf(normalized);
+  if (!executable) return "shell";
+  return `app:${APP_ALIASES[executable] ?? executable}`;
 }
 
 export function contextualMatch(
@@ -65,15 +97,15 @@ export function contextualMatch(
   shellCommands: readonly string[],
   customCommands: readonly string[],
 ): string | null {
-  const candidates =
-    scope === "shell"
-      ? [...customCommands, ...history, ...shellCommands]
-      : [...history, ...CONTEXT_COMMANDS[scope]];
+  const app = scope === "shell" ? null : scope.slice(4);
+  const candidates = app
+    ? [...history, ...(APP_COMMANDS[app] ?? [])]
+    : [...customCommands, ...history, ...shellCommands];
   const matches = (cmd: string) => {
-    const prefixMatches =
-      scope === "mysql" || scope === "postgres"
-        ? cmd.toLowerCase().startsWith(input.toLowerCase())
-        : cmd.startsWith(input);
+    const caseInsensitive = app === "mysql" || app === "postgres";
+    const prefixMatches = caseInsensitive
+      ? cmd.toLowerCase().startsWith(input.toLowerCase())
+      : cmd.startsWith(input);
     return prefixMatches && cmd !== input;
   };
   return candidates.find(matches) ?? null;

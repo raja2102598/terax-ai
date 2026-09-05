@@ -221,6 +221,13 @@ export function resetAutoSuggestScope(leafId: number): void {
   getSlotForLeaf(leafId)?.autoSuggest.setShellScope();
 }
 
+export function setAutoSuggestCommandContext(
+  leafId: number,
+  command: string,
+): void {
+  getSlotForLeaf(leafId)?.autoSuggest.enterCommandContext(command);
+}
+
 function createSlot(): Slot {
   let focusTerminal = () => {};
   const term = new Terminal({

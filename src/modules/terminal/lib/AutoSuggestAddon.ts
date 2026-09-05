@@ -240,6 +240,15 @@ export class AutoSuggestAddon implements ITerminalAddon {
     this.resetInput();
   }
 
+  /** Enter the context of a command submitted outside xterm's input surface. */
+  enterCommandContext(command: string): void {
+    const nextScope = nextSuggestionScope("shell", command);
+    if (nextScope === this._scope) return;
+    this._scope = nextScope;
+    this._history = loadHistory(this._sessionContext, this._scope);
+    this.resetInput();
+  }
+
   /**
    * Accept the current suggestion: write the remainder to the PTY and
    * commit the full command to history. Returns true if a suggestion was

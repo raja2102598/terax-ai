@@ -73,6 +73,7 @@ export type BlockDecorationsOptions = {
   onCwd?: (cwd: string) => void;
   onMode?: (mode: BlockMode) => void;
   onViewport?: () => void;
+  onCommand?: (command: string) => void;
 };
 
 export class BlockDecorations {
@@ -90,6 +91,7 @@ export class BlockDecorations {
   private readonly onCwd?: (cwd: string) => void;
   private readonly onMode?: (mode: BlockMode) => void;
   private readonly onViewport?: () => void;
+  private readonly onCommand?: (command: string) => void;
   private viewportRaf: number | null = null;
 
   constructor(
@@ -99,6 +101,7 @@ export class BlockDecorations {
     this.onCwd = opts?.onCwd;
     this.onMode = opts?.onMode;
     this.onViewport = opts?.onViewport;
+    this.onCommand = opts?.onCommand;
     this.term.options.cursorInactiveStyle = "none";
     const osc133 = term.parser.registerOscHandler(133, (data) => {
       this.onOsc133(data);
@@ -505,6 +508,7 @@ export class BlockDecorations {
       startMarker: marker,
       usedAlt: false,
     };
+    this.onCommand?.(commandFromMarker);
     this.scheduleViewport();
   }
 
