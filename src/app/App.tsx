@@ -1538,7 +1538,7 @@ export default function App() {
               onCd={sendCd}
               onWorkspaceChange={handleWorkspaceChange}
               onOpenMini={openMini}
-              onOpenAi={togglePanAi={togglePanelAndFocus}
+              onOpenAi={togglePanelAndFocus}
               hasComposer={hasComposer}
               privateActive={
                 activeTab?.kind === "terminal" && activeTab.private === true
