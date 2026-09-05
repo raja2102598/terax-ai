@@ -109,7 +109,7 @@ export function EditorStack({
             )}
             aria-hidden={!visible}
           >
-            <div className="relative h-full overflow-hidden rounded-md border border-border/60 bg-background">
+            <div className="relative h-full overflow-hidden bg-background">
               {isImage(t.path) ? (
                 <MediaPane path={t.path} />
               ) : isParquet(t.path) ? (
