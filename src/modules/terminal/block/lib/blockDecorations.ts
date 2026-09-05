@@ -59,6 +59,7 @@ export type PositionedBlock = {
   bottom: number;
   // Pixel top of the header row (one line above the command, in the blank gap).
   headerTop: number;
+  selected: boolean;
 };
 
 export type VisibleBlocks = {
@@ -268,7 +269,10 @@ export class BlockDecorations {
     let sticky: PositionedBlock | null = null;
 
     const consider = (
-      meta: Omit<PositionedBlock, "top" | "bottom" | "ok" | "headerTop">,
+      meta: Omit<
+        PositionedBlock,
+        "top" | "bottom" | "ok" | "headerTop" | "selected"
+      >,
       startLine: number,
       endLine: number,
     ) => {
@@ -284,6 +288,7 @@ export class BlockDecorations {
         // The C marker lands on the first output line, so the command echo is
         // one row above `top` and the blank header gap is two rows above.
         headerTop: top - 1.9 * cellHeight,
+        selected: meta.id === this.selectedId && term.hasSelection(),
       };
       out.push(pb);
       if (startLine < vpTop && endLine >= vpTop) sticky = pb;
@@ -363,12 +368,24 @@ export class BlockDecorations {
     if (!r) return;
     this.term.selectLines(r.start, r.end);
     this.selectedId = id;
+    this.scheduleViewport();
+  }
+
+  selectCurrentBlock(): void {
+    const id = this.selectedId ?? this.entries[this.entries.length - 1]?.id;
+    if (id) this.selectBlock(id);
+  }
+
+  readCurrentBlock(): BlockContext | null {
+    const id = this.selectedId ?? this.entries[this.entries.length - 1]?.id;
+    return id ? this.readById(id) : null;
   }
 
   clearBlockSelection(): boolean {
     const had = this.term.hasSelection();
     this.term.clearSelection();
     this.selectedId = null;
+    this.scheduleViewport();
     return had;
   }
 

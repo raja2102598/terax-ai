@@ -30,6 +30,11 @@ export type ShortcutId =
   | "pane.source"
   | "terminal.clear"
   | "terminal.toggleInput"
+  | "terminal.copyFull"
+  | "terminal.scrollTop"
+  | "terminal.scrollBottom"
+  | "blocks.copyOutput"
+  | "blocks.selectOutput"
   | "blocks.prev"
   | "blocks.next"
   | "search.focus"
@@ -202,6 +207,36 @@ export const SHORTCUTS: Shortcut[] = [
     label: "Toggle Shell / AI input",
     group: "Terminal",
     defaultBindings: [{ [MOD_PROP]: true, key: "u" }],
+  },
+  {
+    id: "terminal.copyFull",
+    label: "Copy full terminal scrollback",
+    group: "Terminal",
+    defaultBindings: [],
+  },
+  {
+    id: "terminal.scrollTop",
+    label: "Jump to top of terminal",
+    group: "Terminal",
+    defaultBindings: [{ [MOD_PROP]: true, key: "Home" }],
+  },
+  {
+    id: "terminal.scrollBottom",
+    label: "Jump to live terminal output",
+    group: "Terminal",
+    defaultBindings: [{ [MOD_PROP]: true, key: "End" }],
+  },
+  {
+    id: "blocks.copyOutput",
+    label: "Copy current command block output",
+    group: "Terminal",
+    defaultBindings: [{ [MOD_PROP]: true, shift: true, key: "c" }],
+  },
+  {
+    id: "blocks.selectOutput",
+    label: "Select current command block output",
+    group: "Terminal",
+    defaultBindings: [],
   },
   {
     id: "blocks.prev",
@@ -423,7 +458,7 @@ function keyFromCode(code: string): string | null {
 export function matchBinding(
   e: KeyboardEvent,
   binding: KeyBinding,
-  id?: ShortcutId
+  id?: ShortcutId,
 ): boolean {
   const eventKey = e.key.toLowerCase();
   const bindingKey = binding.key.toLowerCase();

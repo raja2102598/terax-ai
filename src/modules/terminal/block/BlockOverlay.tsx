@@ -151,10 +151,17 @@ function BlockChrome({ block, all, onSearch }: ChromeProps) {
   return (
     <>
       <div
-        className={cn("bt-divider", !block.ok && "bt-divider-fail")}
+        className={cn(
+          "bt-divider",
+          !block.ok && "bt-divider-fail",
+          block.selected && "bt-divider-selected",
+        )}
         style={{ top: block.bottom }}
       />
-      <div className="bt-bar" style={{ top: block.headerTop }}>
+      <div
+        className={cn("bt-bar", block.selected && "bt-bar-selected")}
+        style={{ top: block.headerTop }}
+      >
         <Meta block={block} />
         <Toolbar block={block} all={all} onSearch={onSearch} />
       </div>

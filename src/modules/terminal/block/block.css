@@ -115,6 +115,15 @@
   background: color-mix(in srgb, var(--destructive, #e5706b) 50%, transparent);
 }
 
+.bt-divider-selected {
+  height: 2px;
+  background: color-mix(in srgb, var(--ring) 70%, transparent);
+}
+
+.bt-bar-selected {
+  opacity: 1;
+}
+
 .bt-match {
   background: rgba(255, 193, 84, 0.5);
   border-radius: 2px;
@@ -304,6 +313,7 @@
 }
 
 .terminal-quick-tools:hover .terminal-copy-all,
+.terminal-quick-tools[data-mode="always"] .terminal-copy-all,
 .terminal-copy-all:focus-visible {
   opacity: 1;
 }
@@ -320,6 +330,27 @@
   touch-action: none;
 }
 
+.terminal-fast-track:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--ring) 70%, transparent);
+  outline-offset: 1px;
+}
+
+.terminal-scroll-marker {
+  position: absolute;
+  z-index: 1;
+  left: 1px;
+  width: 10px;
+  height: 2px;
+  border-radius: 2px;
+  background: color-mix(in srgb, #5fb3b3 75%, transparent);
+  transform: translateY(-1px);
+}
+
+.terminal-scroll-marker[data-failed="true"] {
+  height: 3px;
+  background: color-mix(in srgb, var(--destructive, #e5706b) 85%, transparent);
+}
+
 .terminal-fast-track[data-scrollable="true"]:hover {
   background: color-mix(in srgb, var(--foreground) 4%, transparent);
 }
@@ -330,6 +361,27 @@
   border-radius: 999px;
   background: color-mix(in srgb, var(--foreground) 22%, transparent);
   transition: width var(--dur-fast) var(--ease-soft), background var(--dur-fast) var(--ease-soft);
+}
+
+.terminal-jump-live {
+  position: absolute;
+  right: 14px;
+  bottom: 0;
+  display: flex;
+  height: 24px;
+  min-width: 24px;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--popover) 96%, transparent);
+  color: var(--foreground);
+  box-shadow: 0 5px 18px rgba(0, 0, 0, 0.3);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  pointer-events: auto;
 }
 
 .terminal-fast-track:hover .terminal-fast-thumb,

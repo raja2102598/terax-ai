@@ -26,6 +26,7 @@ import {
 import { openPty, type PtySession } from "./pty-bridge";
 import { deleteSnapshot, getSnapshot, putSnapshot } from "./snapshotStore";
 import "../block/block.css";
+import type { ScrollMarker } from "../TerminalFastScrollbar";
 import { ensureAgentActivityListener, isAgentActivePty } from "./agentActivity";
 import type { TerminalScrollState } from "./fastScroll";
 import {
@@ -1001,6 +1002,18 @@ export function useTerminalSession({
     [leafId],
   );
 
+  const getViewport = useCallback((): string | null => {
+    const term = getSlotForLeaf(leafId)?.term;
+    if (!term) return null;
+    const buf = term.buffer.active;
+    const lines: string[] = [];
+    for (let i = buf.viewportY; i < buf.viewportY + term.rows; i++) {
+      lines.push(buf.getLine(i)?.translateToString(true) ?? "");
+    }
+    while (lines.length && lines[lines.length - 1] === "") lines.pop();
+    return lines.join("\n");
+  }, [leafId]);
+
   const getSelection = useCallback((): string | null => {
     const slot = getSlotForLeaf(leafId);
     const sel = slot?.term.getSelection() ?? "";
@@ -1021,6 +1034,87 @@ export function useTerminalSession({
     (line: number) => getSlotForLeaf(leafId)?.term.scrollToLine(line),
     [leafId],
   );
+
+  const scrollToBottom = useCallback(
+    () => getSlotForLeaf(leafId)?.term.scrollToBottom(),
+    [leafId],
+  );
+
+  const copyText = useCallback(async (text: string | null) => {
+    if (!text) return false;
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      return false;
+    }
+  }, []);
+
+  const copyFull = useCallback(
+    () => copyText(getBuffer(Number.MAX_SAFE_INTEGER)),
+    [copyText, getBuffer],
+  );
+
+  const copyCurrentBlock = useCallback(
+    () =>
+      copyText(
+        sessions.get(leafId)?.blockDecorations?.readCurrentBlock()?.output ??
+          null,
+      ),
+    [copyText, leafId],
+  );
+
+  const selectCurrentBlock = useCallback(
+    () => sessions.get(leafId)?.blockDecorations?.selectCurrentBlock(),
+    [leafId],
+  );
+
+  const getCurrentBlock = useCallback(
+    () =>
+      sessions.get(leafId)?.blockDecorations?.readCurrentBlock()?.output ??
+      null,
+    [leafId],
+  );
+
+  const subscribeScroll = useCallback(
+    (notify: () => void) => {
+      let attachedTerm = getSlotForLeaf(leafId)?.term ?? null;
+      let cleanups: (() => void)[] = [];
+      const attach = () => {
+        const term = getSlotForLeaf(leafId)?.term;
+        if (term === attachedTerm && cleanups.length > 0) return;
+        for (const cleanup of cleanups) cleanup();
+        cleanups = [];
+        attachedTerm = term ?? null;
+        if (!term) return notify();
+        const disposables = [
+          term.onScroll(notify),
+          term.onResize(notify),
+          term.onWriteParsed(notify),
+        ];
+        cleanups = disposables.map((d) => () => d.dispose());
+        notify();
+      };
+      attach();
+      // Renderer slots can be parked and rebound. This low-frequency identity
+      // check only reconnects event listeners; scroll state itself is event-driven.
+      const watcher = setInterval(attach, 250);
+      return () => {
+        clearInterval(watcher);
+        for (const cleanup of cleanups) cleanup();
+      };
+    },
+    [leafId],
+  );
+
+  const scrollMarkers = useCallback((): ScrollMarker[] => {
+    const blocks = sessions.get(leafId)?.blockDecorations?.getBlocks() ?? [];
+    return blocks.map((block) => ({
+      line: block.startLine,
+      failed: block.exitCode !== null && block.exitCode !== 0,
+      label: block.command || "command block",
+    }));
+  }, [leafId]);
 
   const applyTheme = useCallback(() => {
     applyPoolTheme();
@@ -1090,9 +1184,17 @@ export function useTerminalSession({
       write,
       focus,
       getBuffer,
+      getViewport,
       getSelection,
       getScrollState,
       scrollToLine,
+      scrollToBottom,
+      copyFull,
+      copyCurrentBlock,
+      selectCurrentBlock,
+      getCurrentBlock,
+      subscribeScroll,
+      scrollMarkers,
       applyTheme,
       blockMode,
       selectBlockAt,
@@ -1108,9 +1210,17 @@ export function useTerminalSession({
       write,
       focus,
       getBuffer,
+      getViewport,
       getSelection,
       getScrollState,
       scrollToLine,
+      scrollToBottom,
+      copyFull,
+      copyCurrentBlock,
+      selectCurrentBlock,
+      getCurrentBlock,
+      subscribeScroll,
+      scrollMarkers,
       applyTheme,
       blockMode,
       selectBlockAt,

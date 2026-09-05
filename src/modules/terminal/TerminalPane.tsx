@@ -1,3 +1,4 @@
+import { usePreferencesStore } from "@/modules/settings/preferences";
 import { useTheme } from "@/modules/theme";
 import type { SearchAddon } from "@xterm/addon-search";
 import {
@@ -21,6 +22,11 @@ export type TerminalPaneHandle = {
   focus: () => void;
   getBuffer: (maxLines?: number) => string | null;
   getSelection: () => string | null;
+  copyFull: () => Promise<boolean>;
+  copyCurrentBlock: () => Promise<boolean>;
+  selectCurrentBlock: () => void;
+  scrollToTop: () => void;
+  scrollToBottom: () => void;
 };
 
 type Props = {
@@ -55,6 +61,10 @@ export const TerminalPane = memo(
     const containerRef = useRef<HTMLDivElement>(null);
     const downYRef = useRef<number | null>(null);
     const { resolvedMode, activeTheme } = useTheme();
+    const scrollbarMode = usePreferencesStore((s) => s.terminalScrollbarMode);
+    const showBlockMarkers = usePreferencesStore(
+      (s) => s.terminalShowBlockMarkers,
+    );
 
     const session = useTerminalSession({
       leafId,
@@ -81,6 +91,11 @@ export const TerminalPane = memo(
         focus: () => session.focus(),
         getBuffer: (max?: number) => session.getBuffer(max),
         getSelection: () => session.getSelection(),
+        copyFull: () => session.copyFull(),
+        copyCurrentBlock: () => session.copyCurrentBlock(),
+        selectCurrentBlock: () => session.selectCurrentBlock(),
+        scrollToTop: () => session.scrollToLine(0),
+        scrollToBottom: () => session.scrollToBottom(),
       }),
       [session],
     );
@@ -94,9 +109,23 @@ export const TerminalPane = memo(
 
     const quickTools = (
       <TerminalFastScrollbar
+        controlId={`terminal-${leafId}`}
+        mode={scrollbarMode}
         getState={session.getScrollState}
+        subscribe={session.subscribeScroll}
         scrollToLine={session.scrollToLine}
-        readTerminal={() => session.getBuffer(Number.MAX_SAFE_INTEGER)}
+        readTerminal={(scope) =>
+          scope === "viewport"
+            ? session.getViewport()
+            : scope === "selection"
+              ? session.getSelection()
+              : scope === "block"
+                ? session.getCurrentBlock()
+                : session.getBuffer(
+                    scope === "last200" ? 200 : Number.MAX_SAFE_INTEGER,
+                  )
+        }
+        markers={blocks && showBlockMarkers ? session.scrollMarkers : undefined}
       />
     );
 
@@ -110,6 +139,7 @@ export const TerminalPane = memo(
             {/* biome-ignore lint/a11y/noStaticElementInteractions: terminal surface; pointer selects command blocks */}
             <div
               ref={containerRef}
+              id={`terminal-${leafId}`}
               className="absolute inset-0 z-0"
               onMouseDown={(e) => {
                 downYRef.current = e.clientY;
@@ -149,7 +179,11 @@ export const TerminalPane = memo(
 
     return (
       <div className="zoom-exempt relative h-full w-full" style={hideStyle}>
-        <div ref={containerRef} className="absolute inset-0" />
+        <div
+          id={`terminal-${leafId}`}
+          ref={containerRef}
+          className="absolute inset-0"
+        />
         {quickTools}
       </div>
     );
