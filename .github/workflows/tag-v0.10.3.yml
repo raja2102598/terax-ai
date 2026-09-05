@@ -24,5 +24,5 @@ jobs:
             echo "v0.10.3 already exists"
             exit 0
           fi
-          git tag -a v0.10.3 "$GITHUB_SHA" -m "Terax v0.10.3"
+          git tag v0.10.3 "$GITHUB_SHA"
           git push origin v0.10.3
