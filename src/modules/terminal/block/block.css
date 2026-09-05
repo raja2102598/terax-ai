@@ -272,6 +272,72 @@
   opacity: 0.9;
 }
 
+/* A compact overview rail: always easy to grab, but visually quiet until the
+   pointer approaches it. It bypasses the hidden native xterm scrollbar. */
+.terminal-quick-tools {
+  position: absolute;
+  z-index: 20;
+  top: 7px;
+  right: 4px;
+  bottom: 7px;
+  display: flex;
+  width: 18px;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  pointer-events: none;
+}
+
+.terminal-copy-all {
+  display: grid;
+  width: 22px;
+  height: 22px;
+  place-items: center;
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.1));
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--popover, #1b1b1d) 94%, transparent);
+  color: var(--muted-foreground);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.24);
+  opacity: 0;
+  pointer-events: auto;
+  transition: opacity var(--dur-fast) var(--ease-soft), color var(--dur-fast) var(--ease-soft);
+}
+
+.terminal-quick-tools:hover .terminal-copy-all,
+.terminal-copy-all:focus-visible {
+  opacity: 1;
+}
+
+.terminal-copy-all:hover { color: var(--foreground); }
+
+.terminal-fast-track {
+  position: relative;
+  width: 12px;
+  min-height: 0;
+  flex: 1;
+  border-radius: 999px;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.terminal-fast-track[data-scrollable="true"]:hover {
+  background: color-mix(in srgb, var(--foreground) 4%, transparent);
+}
+
+.terminal-fast-thumb {
+  position: absolute;
+  inset: 0 2px auto;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--foreground) 22%, transparent);
+  transition: width var(--dur-fast) var(--ease-soft), background var(--dur-fast) var(--ease-soft);
+}
+
+.terminal-fast-track:hover .terminal-fast-thumb,
+.terminal-fast-thumb:active {
+  inset-inline: 1px;
+  background: color-mix(in srgb, var(--foreground) 42%, transparent);
+}
+
 .cm-history-footer {
   padding: 5px 10px;
   border-top: 1px solid var(--border, rgba(255, 255, 255, 0.1));

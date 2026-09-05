@@ -14,6 +14,7 @@ import {
   submitToLeaf,
   useTerminalSession,
 } from "./lib/useTerminalSession";
+import { TerminalFastScrollbar } from "./TerminalFastScrollbar";
 
 export type TerminalPaneHandle = {
   write: (data: string) => void;
@@ -91,6 +92,14 @@ export const TerminalPane = memo(
 
     const promptReady = session.blockMode === "prompt";
 
+    const quickTools = (
+      <TerminalFastScrollbar
+        getState={session.getScrollState}
+        scrollToLine={session.scrollToLine}
+        readTerminal={() => session.getBuffer(Number.MAX_SAFE_INTEGER)}
+      />
+    );
+
     if (blocks) {
       return (
         <div
@@ -122,6 +131,7 @@ export const TerminalPane = memo(
               subscribe={session.subscribeBlocks}
               getVisible={session.visibleBlocks}
               readOutput={(id) => session.readBlockId(id)?.output ?? null}
+              selectBlock={session.selectBlock}
               searchBlock={session.searchBlock}
               revealMatch={session.revealMatch}
               clearSearch={session.clearSearch}
@@ -131,17 +141,17 @@ export const TerminalPane = memo(
                 if (session.blockMode === "prompt") focusLeafInput(leafId);
               }}
             />
+            {quickTools}
           </div>
         </div>
       );
     }
 
     return (
-      <div
-        ref={containerRef}
-        className="zoom-exempt h-full w-full"
-        style={hideStyle}
-      />
+      <div className="zoom-exempt relative h-full w-full" style={hideStyle}>
+        <div ref={containerRef} className="absolute inset-0" />
+        {quickTools}
+      </div>
     );
   }),
 );

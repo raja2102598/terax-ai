@@ -17,7 +17,6 @@ import {
 } from "../block/lib/blockDecorations";
 import type { BlockMode } from "../block/lib/modeMachine";
 import { DormantRing } from "./dormantRing";
-import { getSnapshot, putSnapshot, deleteSnapshot } from "./snapshotStore";
 import {
   createShellIntegrationState,
   registerCwdHandler,
@@ -25,17 +24,19 @@ import {
   registerPromptTracker,
 } from "./osc-handlers";
 import { openPty, type PtySession } from "./pty-bridge";
+import { deleteSnapshot, getSnapshot, putSnapshot } from "./snapshotStore";
 import "../block/block.css";
 import { ensureAgentActivityListener, isAgentActivePty } from "./agentActivity";
+import type { TerminalScrollState } from "./fastScroll";
 import {
   acquireSlot,
   applyBackgroundActive,
   applyCursorBlink,
   applyCursorStyle,
   applyLetterSpacing,
-  applyTerminalFont,
   applyTheme as applyPoolTheme,
   applyScrollback,
+  applyTerminalFont,
   applyWebglPreference,
   configureRendererPool,
   discardRetainedSlot,
@@ -1006,6 +1007,21 @@ export function useTerminalSession({
     return sel.length > 0 ? sel : null;
   }, [leafId]);
 
+  const getScrollState = useCallback((): TerminalScrollState => {
+    const term = getSlotForLeaf(leafId)?.term;
+    if (!term) return { line: 0, totalLines: 1, viewportLines: 1 };
+    return {
+      line: term.buffer.active.viewportY,
+      totalLines: Math.max(term.rows, term.buffer.active.length),
+      viewportLines: term.rows,
+    };
+  }, [leafId]);
+
+  const scrollToLine = useCallback(
+    (line: number) => getSlotForLeaf(leafId)?.term.scrollToLine(line),
+    [leafId],
+  );
+
   const applyTheme = useCallback(() => {
     applyPoolTheme();
   }, []);
@@ -1019,6 +1035,11 @@ export function useTerminalSession({
   const readBlockId = useCallback(
     (id: string) =>
       sessions.get(leafId)?.blockDecorations?.readById(id) ?? null,
+    [leafId],
+  );
+
+  const selectBlock = useCallback(
+    (id: string) => sessions.get(leafId)?.blockDecorations?.selectBlock(id),
     [leafId],
   );
 
@@ -1070,10 +1091,13 @@ export function useTerminalSession({
       focus,
       getBuffer,
       getSelection,
+      getScrollState,
+      scrollToLine,
       applyTheme,
       blockMode,
       selectBlockAt,
       readBlockId,
+      selectBlock,
       subscribeBlocks,
       visibleBlocks,
       searchBlock,
@@ -1085,10 +1109,13 @@ export function useTerminalSession({
       focus,
       getBuffer,
       getSelection,
+      getScrollState,
+      scrollToLine,
       applyTheme,
       blockMode,
       selectBlockAt,
       readBlockId,
+      selectBlock,
       subscribeBlocks,
       visibleBlocks,
       searchBlock,
