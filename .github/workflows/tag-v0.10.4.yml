@@ -1,0 +1,29 @@
+name: Tag Terax v0.10.4
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/tag-v0.10.4.yml"
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  tag-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Create v0.10.4 tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          git tag v0.10.4 "$GITHUB_SHA"
+          git push origin v0.10.4
+      - name: Start release build
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run release.yml --ref v0.10.4
