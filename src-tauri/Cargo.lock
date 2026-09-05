@@ -860,7 +860,7 @@ dependencies = [
 
 [[package]]
 name = "const-oid"
-version = "0.10.2"
+version = "0.10.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
 
@@ -6000,7 +6000,7 @@ dependencies = [
 
 [[package]]
 name = "terax"
-version = "0.10.2"
+version = "0.10.3"
 dependencies = [
  "arrow",
  "base64 0.22.1",
@@ -6053,7 +6053,7 @@ dependencies = [
 
 [[package]]
 name = "terax-cli"
-version = "0.10.2"
+version = "0.10.3"
 dependencies = [
  "dirs 6.0.0",
  "libc",
@@ -6065,7 +6065,7 @@ dependencies = [
 
 [[package]]
 name = "terax-control-protocol"
-version = "0.10.2"
+version = "0.10.3"
 dependencies = [
  "serde",
  "serde_json",
