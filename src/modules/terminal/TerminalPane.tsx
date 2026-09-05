@@ -1,3 +1,4 @@
+import { usePreferencesStore } from "@/modules/settings/preferences";
 import { useTheme } from "@/modules/theme";
 import type { SearchAddon } from "@xterm/addon-search";
 import {
@@ -14,12 +15,18 @@ import {
   submitToLeaf,
   useTerminalSession,
 } from "./lib/useTerminalSession";
+import { TerminalFastScrollbar } from "./TerminalFastScrollbar";
 
 export type TerminalPaneHandle = {
   write: (data: string) => void;
   focus: () => void;
   getBuffer: (maxLines?: number) => string | null;
   getSelection: () => string | null;
+  copyFull: () => Promise<boolean>;
+  copyCurrentBlock: () => Promise<boolean>;
+  selectCurrentBlock: () => void;
+  scrollToTop: () => void;
+  scrollToBottom: () => void;
 };
 
 type Props = {
@@ -54,6 +61,10 @@ export const TerminalPane = memo(
     const containerRef = useRef<HTMLDivElement>(null);
     const downYRef = useRef<number | null>(null);
     const { resolvedMode, activeTheme } = useTheme();
+    const scrollbarMode = usePreferencesStore((s) => s.terminalScrollbarMode);
+    const showBlockMarkers = usePreferencesStore(
+      (s) => s.terminalShowBlockMarkers,
+    );
 
     const session = useTerminalSession({
       leafId,
@@ -80,6 +91,11 @@ export const TerminalPane = memo(
         focus: () => session.focus(),
         getBuffer: (max?: number) => session.getBuffer(max),
         getSelection: () => session.getSelection(),
+        copyFull: () => session.copyFull(),
+        copyCurrentBlock: () => session.copyCurrentBlock(),
+        selectCurrentBlock: () => session.selectCurrentBlock(),
+        scrollToTop: () => session.scrollToLine(0),
+        scrollToBottom: () => session.scrollToBottom(),
       }),
       [session],
     );
@@ -91,6 +107,28 @@ export const TerminalPane = memo(
 
     const promptReady = session.blockMode === "prompt";
 
+    const quickTools = (
+      <TerminalFastScrollbar
+        controlId={`terminal-${leafId}`}
+        mode={scrollbarMode}
+        getState={session.getScrollState}
+        subscribe={session.subscribeScroll}
+        scrollToLine={session.scrollToLine}
+        readTerminal={(scope) =>
+          scope === "viewport"
+            ? session.getViewport()
+            : scope === "selection"
+              ? session.getSelection()
+              : scope === "block"
+                ? session.getCurrentBlock()
+                : session.getBuffer(
+                    scope === "last200" ? 200 : Number.MAX_SAFE_INTEGER,
+                  )
+        }
+        markers={blocks && showBlockMarkers ? session.scrollMarkers : undefined}
+      />
+    );
+
     if (blocks) {
       return (
         <div
@@ -101,6 +139,7 @@ export const TerminalPane = memo(
             {/* biome-ignore lint/a11y/noStaticElementInteractions: terminal surface; pointer selects command blocks */}
             <div
               ref={containerRef}
+              id={`terminal-${leafId}`}
               className="absolute inset-0 z-0"
               onMouseDown={(e) => {
                 downYRef.current = e.clientY;
@@ -122,6 +161,7 @@ export const TerminalPane = memo(
               subscribe={session.subscribeBlocks}
               getVisible={session.visibleBlocks}
               readOutput={(id) => session.readBlockId(id)?.output ?? null}
+              selectBlock={session.selectBlock}
               searchBlock={session.searchBlock}
               revealMatch={session.revealMatch}
               clearSearch={session.clearSearch}
@@ -131,17 +171,21 @@ export const TerminalPane = memo(
                 if (session.blockMode === "prompt") focusLeafInput(leafId);
               }}
             />
+            {quickTools}
           </div>
         </div>
       );
     }
 
     return (
-      <div
-        ref={containerRef}
-        className="zoom-exempt h-full w-full"
-        style={hideStyle}
-      />
+      <div className="zoom-exempt relative h-full w-full" style={hideStyle}>
+        <div
+          id={`terminal-${leafId}`}
+          ref={containerRef}
+          className="absolute inset-0"
+        />
+        {quickTools}
+      </div>
     );
   }),
 );

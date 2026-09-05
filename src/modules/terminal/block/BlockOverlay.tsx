@@ -41,6 +41,7 @@ type Props = {
   subscribe: (cb: () => void) => () => void;
   getVisible: () => VisibleBlocks;
   readOutput: (id: string) => string | null;
+  selectBlock: (id: string) => void;
   searchBlock: (id: string, query: string) => BlockMatch[];
   revealMatch: (m: BlockMatch) => void;
   clearSearch: () => void;
@@ -150,10 +151,17 @@ function BlockChrome({ block, all, onSearch }: ChromeProps) {
   return (
     <>
       <div
-        className={cn("bt-divider", !block.ok && "bt-divider-fail")}
+        className={cn(
+          "bt-divider",
+          !block.ok && "bt-divider-fail",
+          block.selected && "bt-divider-selected",
+        )}
         style={{ top: block.bottom }}
       />
-      <div className="bt-bar" style={{ top: block.headerTop }}>
+      <div
+        className={cn("bt-bar", block.selected && "bt-bar-selected")}
+        style={{ top: block.headerTop }}
+      >
         <Meta block={block} />
         <Toolbar block={block} all={all} onSearch={onSearch} />
       </div>
@@ -258,6 +266,11 @@ function BlockMenu({ block, all, onSearch }: ChromeProps) {
             const o = output();
             if (o) copy(o, "Output copied");
           }}
+        />
+        <MenuItem
+          icon={ComputerTerminal02Icon}
+          label="Select block output"
+          onClick={() => all.selectBlock(block.id)}
         />
         <MenuItem
           icon={Copy01Icon}

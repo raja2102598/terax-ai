@@ -37,7 +37,9 @@ import {
   setTerminalFontWeight,
   setTerminalLetterSpacing,
   setTerminalScrollback,
+  setTerminalScrollbarMode,
   setTerminalShell,
+  setTerminalShowBlockMarkers,
   setTerminalWebglEnabled,
   setZoomLevel,
   TERMINAL_FONT_SIZES,
@@ -117,6 +119,12 @@ export function GeneralSection() {
   );
   const terminalFontSize = usePreferencesStore((s) => s.terminalFontSize);
   const terminalScrollback = usePreferencesStore((s) => s.terminalScrollback);
+  const terminalScrollbarMode = usePreferencesStore(
+    (s) => s.terminalScrollbarMode,
+  );
+  const terminalShowBlockMarkers = usePreferencesStore(
+    (s) => s.terminalShowBlockMarkers,
+  );
   const confirmCloseRunningTerminal = usePreferencesStore(
     (s) => s.confirmCloseRunningTerminal,
   );
@@ -467,6 +475,35 @@ export function GeneralSection() {
               ))}
             </SelectContent>
           </Select>
+        </SettingRow>
+        <SettingRow
+          title="Fast scrollbar"
+          description="Show the terminal overview rail and transcript actions."
+        >
+          <Select
+            value={terminalScrollbarMode}
+            onValueChange={(v) =>
+              void setTerminalScrollbarMode(v as "auto" | "always" | "hidden")
+            }
+          >
+            <SelectTrigger size="sm" className="h-8 w-28 text-[12px]">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="auto">On hover</SelectItem>
+              <SelectItem value="always">Always</SelectItem>
+              <SelectItem value="hidden">Hidden</SelectItem>
+            </SelectContent>
+          </Select>
+        </SettingRow>
+        <SettingRow
+          title="Command markers"
+          description="Show command and failure locations on the fast scrollbar."
+        >
+          <Switch
+            checked={terminalShowBlockMarkers}
+            onCheckedChange={(v) => void setTerminalShowBlockMarkers(v)}
+          />
         </SettingRow>
         <SettingRow
           title="Scrollback"

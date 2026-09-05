@@ -217,6 +217,17 @@ export function applyBackgroundActive(active: boolean): void {
   }
 }
 
+export function resetAutoSuggestScope(leafId: number): void {
+  getSlotForLeaf(leafId)?.autoSuggest.setShellScope();
+}
+
+export function setAutoSuggestCommandContext(
+  leafId: number,
+  command: string,
+): void {
+  getSlotForLeaf(leafId)?.autoSuggest.enterCommandContext(command);
+}
+
 function createSlot(): Slot {
   let focusTerminal = () => {};
   const term = new Terminal({
@@ -528,6 +539,7 @@ function bindSlot(slot: Slot, p: AcquireParams): void {
   slot.currentLeafId = p.leafId;
   slot.lastUsedAt = performance.now();
   transitionImeBridgeOwner(slot.imeState, p.leafId);
+  slot.autoSuggest.setSessionContext(String(p.leafId));
 
   cancelPendingUnhide(slot);
   cancelWebglReap(slot);

@@ -50,9 +50,9 @@ import { openSettingsWindow } from "@/modules/settings/openSettingsWindow";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import { setShowHidden } from "@/modules/settings/store";
 import {
-  shouldDisablePaneSwapShortcut,
   type ShortcutHandlers,
   type ShortcutId,
+  shouldDisablePaneSwapShortcut,
   useGlobalShortcuts,
 } from "@/modules/shortcuts";
 import {
@@ -74,8 +74,8 @@ import {
 } from "@/modules/spaces";
 import { StatusBar } from "@/modules/statusbar";
 import {
-  TabSwitcherHud,
   type CloseTabsPlan,
+  TabSwitcherHud,
   useTabSwitcher,
   useTabs,
   useWindowTitle,
@@ -89,8 +89,8 @@ import {
   hasLeaf,
   leafIds,
   navigateFocusedBlocks,
-  ptyIdForLeaf,
   type PaneBounds,
+  ptyIdForLeaf,
   type TerminalPaneHandle,
   useAgentActivityStore,
   useTerminalFileDrop,
@@ -105,8 +105,8 @@ import {
 import { UpdaterDialog } from "@/modules/updater";
 import {
   useWorkspaceEnvStore,
-  workspaceScopeKey,
   type WorkspaceEnv,
+  workspaceScopeKey,
 } from "@/modules/workspace";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -126,12 +126,12 @@ import {
   WorkspaceInputBar,
 } from "./components/WorkspaceInputBar";
 import { WorkspaceSurface } from "./components/WorkspaceSurface";
-import { useAppCloseGuard } from "./hooks/useAppCloseGuard";
 import {
   hasOpenPathTab,
   renamedPath,
   spacesEmptiedByTabs,
 } from "./hooks/tabCloseGuards";
+import { useAppCloseGuard } from "./hooks/useAppCloseGuard";
 import { useTabCloseGuards } from "./hooks/useTabCloseGuards";
 import { useWorkspaceSwitcher } from "./hooks/useWorkspaceSwitcher";
 
@@ -908,6 +908,26 @@ export default function App() {
       },
       "terminal.toggleInput": () =>
         window.dispatchEvent(new CustomEvent(TOGGLE_BLOCK_INPUT_EVENT)),
+      "terminal.copyFull": () => {
+        if (activeLeafId != null)
+          void terminalRefs.current.get(activeLeafId)?.copyFull();
+      },
+      "terminal.scrollTop": () =>
+        activeLeafId != null
+          ? terminalRefs.current.get(activeLeafId)?.scrollToTop()
+          : undefined,
+      "terminal.scrollBottom": () =>
+        activeLeafId != null
+          ? terminalRefs.current.get(activeLeafId)?.scrollToBottom()
+          : undefined,
+      "blocks.copyOutput": () => {
+        if (activeLeafId != null)
+          void terminalRefs.current.get(activeLeafId)?.copyCurrentBlock();
+      },
+      "blocks.selectOutput": () =>
+        activeLeafId != null
+          ? terminalRefs.current.get(activeLeafId)?.selectCurrentBlock()
+          : undefined,
       "blocks.prev": () => navigateFocusedBlocks(-1),
       "blocks.next": () => navigateFocusedBlocks(1),
       "search.focus": () => {
@@ -945,6 +965,7 @@ export default function App() {
     }),
     [
       activeId,
+      activeLeafId,
       openCommandPalette,
       stepSwitcher,
       cycleSpace,
@@ -1007,10 +1028,19 @@ export default function App() {
       }
       if (
         id === "terminal.toggleInput" ||
+        id === "blocks.copyOutput" ||
+        id === "blocks.selectOutput" ||
         id === "blocks.prev" ||
         id === "blocks.next"
       ) {
         return !(activeTab?.kind === "terminal" && activeTab.blocks === true);
+      }
+      if (
+        id === "terminal.copyFull" ||
+        id === "terminal.scrollTop" ||
+        id === "terminal.scrollBottom"
+      ) {
+        return activeTab?.kind !== "terminal";
       }
       if (id === "sidebar.toggle") {
         // Ctrl+B is also Claude Code's "run in background" key. While a terminal
@@ -1199,7 +1229,6 @@ export default function App() {
     },
     [reorderTab],
   );
-
 
   const handleNewTabInSpace = useCallback(
     (spaceId: string) => {

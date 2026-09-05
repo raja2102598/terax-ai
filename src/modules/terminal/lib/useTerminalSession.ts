@@ -17,7 +17,6 @@ import {
 } from "../block/lib/blockDecorations";
 import type { BlockMode } from "../block/lib/modeMachine";
 import { DormantRing } from "./dormantRing";
-import { getSnapshot, putSnapshot, deleteSnapshot } from "./snapshotStore";
 import {
   createShellIntegrationState,
   registerCwdHandler,
@@ -25,17 +24,20 @@ import {
   registerPromptTracker,
 } from "./osc-handlers";
 import { openPty, type PtySession } from "./pty-bridge";
+import { deleteSnapshot, getSnapshot, putSnapshot } from "./snapshotStore";
 import "../block/block.css";
+import type { ScrollMarker } from "../TerminalFastScrollbar";
 import { ensureAgentActivityListener, isAgentActivePty } from "./agentActivity";
+import type { TerminalScrollState } from "./fastScroll";
 import {
   acquireSlot,
   applyBackgroundActive,
   applyCursorBlink,
   applyCursorStyle,
   applyLetterSpacing,
-  applyTerminalFont,
   applyTheme as applyPoolTheme,
   applyScrollback,
+  applyTerminalFont,
   applyWebglPreference,
   configureRendererPool,
   discardRetainedSlot,
@@ -49,6 +51,8 @@ import {
   poolSlotStats,
   refreshLeafSlot,
   releaseSlot,
+  resetAutoSuggestScope,
+  setAutoSuggestCommandContext,
   setSlotFocused,
 } from "./rendererPool";
 import { useTerminalFont } from "./useTerminalFont";
@@ -349,6 +353,7 @@ function onLeafCommandState(leafId: number, running: boolean): void {
   const s = sessions.get(leafId);
   if (!s || s.commandRunning === running) return;
   s.commandRunning = running;
+  if (!running) resetAutoSuggestScope(leafId);
   if (!running) {
     scheduleHiddenRelease(leafId, s);
     return;
@@ -637,6 +642,8 @@ function bindLeafToSlot(leafId: number, s: Session): void {
             const set = blockViewportListeners.get(leafId);
             if (set) for (const l of set) l();
           },
+          onCommand: (command) =>
+            setAutoSuggestCommandContext(leafId, command),
         });
         s.blockDecorations = deco;
         const onGridFocus = () => {
@@ -1000,10 +1007,118 @@ export function useTerminalSession({
     [leafId],
   );
 
+  const getViewport = useCallback((): string | null => {
+    const term = getSlotForLeaf(leafId)?.term;
+    if (!term) return null;
+    const buf = term.buffer.active;
+    const lines: string[] = [];
+    for (let i = buf.viewportY; i < buf.viewportY + term.rows; i++) {
+      lines.push(buf.getLine(i)?.translateToString(true) ?? "");
+    }
+    while (lines.length && lines[lines.length - 1] === "") lines.pop();
+    return lines.join("\n");
+  }, [leafId]);
+
   const getSelection = useCallback((): string | null => {
     const slot = getSlotForLeaf(leafId);
     const sel = slot?.term.getSelection() ?? "";
     return sel.length > 0 ? sel : null;
+  }, [leafId]);
+
+  const getScrollState = useCallback((): TerminalScrollState => {
+    const term = getSlotForLeaf(leafId)?.term;
+    if (!term) return { line: 0, totalLines: 1, viewportLines: 1 };
+    return {
+      line: term.buffer.active.viewportY,
+      totalLines: Math.max(term.rows, term.buffer.active.length),
+      viewportLines: term.rows,
+    };
+  }, [leafId]);
+
+  const scrollToLine = useCallback(
+    (line: number) => getSlotForLeaf(leafId)?.term.scrollToLine(line),
+    [leafId],
+  );
+
+  const scrollToBottom = useCallback(
+    () => getSlotForLeaf(leafId)?.term.scrollToBottom(),
+    [leafId],
+  );
+
+  const copyText = useCallback(async (text: string | null) => {
+    if (!text) return false;
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      return false;
+    }
+  }, []);
+
+  const copyFull = useCallback(
+    () => copyText(getBuffer(Number.MAX_SAFE_INTEGER)),
+    [copyText, getBuffer],
+  );
+
+  const copyCurrentBlock = useCallback(
+    () =>
+      copyText(
+        sessions.get(leafId)?.blockDecorations?.readCurrentBlock()?.output ??
+          null,
+      ),
+    [copyText, leafId],
+  );
+
+  const selectCurrentBlock = useCallback(
+    () => sessions.get(leafId)?.blockDecorations?.selectCurrentBlock(),
+    [leafId],
+  );
+
+  const getCurrentBlock = useCallback(
+    () =>
+      sessions.get(leafId)?.blockDecorations?.readCurrentBlock()?.output ??
+      null,
+    [leafId],
+  );
+
+  const subscribeScroll = useCallback(
+    (notify: () => void) => {
+      let attachedTerm = getSlotForLeaf(leafId)?.term ?? null;
+      let cleanups: (() => void)[] = [];
+      const attach = () => {
+        const term = getSlotForLeaf(leafId)?.term;
+        if (term === attachedTerm && cleanups.length > 0) return;
+        for (const cleanup of cleanups) cleanup();
+        cleanups = [];
+        attachedTerm = term ?? null;
+        if (!term) return notify();
+        const disposables = [
+          term.onScroll(notify),
+          term.onResize(notify),
+          term.onWriteParsed(notify),
+        ];
+        cleanups = disposables.map((d) => () => d.dispose());
+        notify();
+      };
+      attach();
+      // Renderer slots can be parked and rebound. This low-frequency identity
+      // check only reconnects event listeners; scroll state itself is event-driven.
+      const watcher = setInterval(attach, 250);
+      return () => {
+        clearInterval(watcher);
+        for (const cleanup of cleanups) cleanup();
+      };
+    },
+    [leafId],
+  );
+
+  const scrollMarkers = useCallback((): ScrollMarker[] => {
+    const blocks = sessions.get(leafId)?.blockDecorations?.getBlocks() ?? [];
+    return blocks.map((block) => ({
+      line: block.startLine,
+      failed: block.exitCode !== null && block.exitCode !== 0,
+      label: block.command || "command block",
+    }));
   }, [leafId]);
 
   const applyTheme = useCallback(() => {
@@ -1019,6 +1134,11 @@ export function useTerminalSession({
   const readBlockId = useCallback(
     (id: string) =>
       sessions.get(leafId)?.blockDecorations?.readById(id) ?? null,
+    [leafId],
+  );
+
+  const selectBlock = useCallback(
+    (id: string) => sessions.get(leafId)?.blockDecorations?.selectBlock(id),
     [leafId],
   );
 
@@ -1069,11 +1189,22 @@ export function useTerminalSession({
       write,
       focus,
       getBuffer,
+      getViewport,
       getSelection,
+      getScrollState,
+      scrollToLine,
+      scrollToBottom,
+      copyFull,
+      copyCurrentBlock,
+      selectCurrentBlock,
+      getCurrentBlock,
+      subscribeScroll,
+      scrollMarkers,
       applyTheme,
       blockMode,
       selectBlockAt,
       readBlockId,
+      selectBlock,
       subscribeBlocks,
       visibleBlocks,
       searchBlock,
@@ -1084,11 +1215,22 @@ export function useTerminalSession({
       write,
       focus,
       getBuffer,
+      getViewport,
       getSelection,
+      getScrollState,
+      scrollToLine,
+      scrollToBottom,
+      copyFull,
+      copyCurrentBlock,
+      selectCurrentBlock,
+      getCurrentBlock,
+      subscribeScroll,
+      scrollMarkers,
       applyTheme,
       blockMode,
       selectBlockAt,
       readBlockId,
+      selectBlock,
       subscribeBlocks,
       visibleBlocks,
       searchBlock,
