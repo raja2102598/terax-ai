@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: write
+  actions: write
 
 jobs:
   tag-release:
@@ -22,7 +23,11 @@ jobs:
           set -euo pipefail
           if git ls-remote --exit-code --tags origin refs/tags/v0.10.3 >/dev/null 2>&1; then
             echo "v0.10.3 already exists"
-            exit 0
+          else
+            git tag v0.10.3 "$GITHUB_SHA"
+            git push origin v0.10.3
           fi
-          git tag v0.10.3 "$GITHUB_SHA"
-          git push origin v0.10.3
+      - name: Start release build
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run release.yml --ref v0.10.3
