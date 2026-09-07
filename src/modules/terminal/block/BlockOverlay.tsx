@@ -29,6 +29,7 @@ import type {
   VisibleBlocks,
 } from "./lib/blockDecorations";
 import { capAttachOutput } from "./lib/outputCap";
+import { writeTerminalClipboard } from "../lib/terminalClipboard";
 
 let cachedHome: string | null = null;
 void homeDir()
@@ -81,10 +82,10 @@ function relPath(p: string): string {
 }
 
 function copy(text: string, message: string) {
-  void navigator.clipboard
-    .writeText(text)
-    .then(() => toast.success(message))
-    .catch(() => {});
+  void writeTerminalClipboard(text).then((copied) => {
+    if (copied) toast.success(message);
+    else toast.error("Clipboard access was denied");
+  });
 }
 
 function signature(v: VisibleBlocks): string {

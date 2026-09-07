@@ -24,15 +24,23 @@ export async function readTerminalClipboard(): Promise<string> {
   }
 }
 
-export async function writeTerminalClipboard(text: string): Promise<void> {
+/** Returns true only when text was accepted by a clipboard transport. */
+export async function writeTerminalClipboard(text: string): Promise<boolean> {
   if (IS_LINUX) {
     try {
-      const { writeText } = await import("@tauri-apps/plugin-clipboard-manager");
+      const { writeText } = await import(
+        "@tauri-apps/plugin-clipboard-manager"
+      );
       await writeText(text);
-      return;
+      return true;
     } catch {}
   }
   try {
-    await webClipboard()?.writeText(text);
-  } catch {}
+    const clipboard = webClipboard();
+    if (!clipboard) return false;
+    await clipboard.writeText(text);
+    return true;
+  } catch {
+    return false;
+  }
 }

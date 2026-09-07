@@ -10,6 +10,7 @@ use std::sync::{Arc, RwLock};
 use std::thread;
 
 use portable_pty::PtySize;
+use serde::Serialize;
 use tauri::ipc::{Channel, Response};
 
 use crate::modules::control::ControlState;
@@ -257,6 +258,103 @@ pub fn pty_has_foreground_job(state: tauri::State<PtyState>, id: u32) -> Result<
     }
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PtyActivity {
+    pub process: Option<String>,
+    pub pid: Option<u32>,
+    pub ports: Vec<u16>,
+}
+
+#[tauri::command]
+pub fn pty_activity(state: tauri::State<PtyState>, id: u32) -> Result<PtyActivity, String> {
+    let sessions = state.sessions.read().unwrap();
+    let session = sessions.get(&id).ok_or_else(|| "no session".to_string())?;
+    let shell_pid = session.shell_pid;
+    if shell_pid == 0 {
+        return Ok(PtyActivity { process: None, pid: None, ports: Vec::new() });
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let foreground = session.master.lock().unwrap().process_group_leader()
+            .and_then(|pid| u32::try_from(pid).ok())
+            .filter(|pid| *pid != shell_pid);
+        let process = foreground.and_then(process_name);
+        let mut pids = process_tree_pids(shell_pid);
+        if let Some(pid) = foreground {
+            pids.insert(pid);
+        }
+        let ports = listening_ports(&pids);
+        Ok(PtyActivity { process, pid: foreground, ports })
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = session;
+        Ok(PtyActivity { process: None, pid: None, ports: Vec::new() })
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn process_name(pid: u32) -> Option<String> {
+    std::fs::read_to_string(format!("/proc/{pid}/comm"))
+        .ok()
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+}
+
+#[cfg(target_os = "linux")]
+fn process_tree_pids(root: u32) -> std::collections::HashSet<u32> {
+    let mut pids = std::collections::HashSet::from([root]);
+    let mut pending = vec![root];
+    while let Some(pid) = pending.pop() {
+        if pids.len() >= 1024 {
+            break;
+        }
+        let Ok(children) = std::fs::read_to_string(format!("/proc/{pid}/task/{pid}/children")) else {
+            continue;
+        };
+        for child in children.split_whitespace().filter_map(|v| v.parse::<u32>().ok()) {
+            if pids.insert(child) {
+                pending.push(child);
+            }
+        }
+    }
+    pids
+}
+
+#[cfg(target_os = "linux")]
+fn listening_ports(pids: &std::collections::HashSet<u32>) -> Vec<u16> {
+    let output = std::process::Command::new("ss")
+        .args(["-H", "-ltnp"])
+        .output()
+        .ok();
+    let Some(output) = output.filter(|output| output.status.success()) else {
+        return Vec::new();
+    };
+    ports_from_ss(&String::from_utf8_lossy(&output.stdout), pids)
+}
+
+#[cfg(target_os = "linux")]
+fn ports_from_ss(ss: &str, pids: &std::collections::HashSet<u32>) -> Vec<u16> {
+    let mut ports = Vec::new();
+    for line in ss.lines() {
+        if !pids.iter().any(|pid| line.contains(&format!("pid={pid}"))) {
+            continue;
+        }
+        let Some(address) = line.split_whitespace().nth(3) else {
+            continue;
+        };
+        let Some(port) = address.rsplit(':').next().and_then(|v| v.parse::<u16>().ok()) else {
+            continue;
+        };
+        if !ports.contains(&port) {
+            ports.push(port);
+        }
+    }
+    ports.sort_unstable();
+    ports
+}
+
 // pgrep -P exits 0 when shell_pid has at least one child, 1 when none.
 #[cfg(unix)]
 fn shell_has_children(shell_pid: u32) -> bool {
@@ -296,6 +394,20 @@ fn shell_has_children(shell_pid: u32) -> bool {
         }
         CloseHandle(snapshot);
         found
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod activity_tests {
+    use super::ports_from_ss;
+    use std::collections::HashSet;
+
+    #[test]
+    fn finds_only_ports_owned_by_the_terminal_process_tree() {
+        let pids = HashSet::from([41, 99]);
+        let ss = "LISTEN 0 4096 127.0.0.1:5173 0.0.0.0:* users:((\"vite\",pid=41,fd=20))\nLISTEN 0 128 *:3000 *:* users:((\"other\",pid=7,fd=4))\nLISTEN 0 128 [::1]:1420 [::]:* users:((\"tauri\",pid=99,fd=8))";
+
+        assert_eq!(ports_from_ss(ss, &pids), vec![1420, 5173]);
     }
 }
 

@@ -27,7 +27,9 @@ import {
   ptyIdForLeaf,
   tabAgentStatus,
   useAgentActivityStore,
+  useTerminalActivity,
 } from "@/modules/terminal";
+import { writeTerminalClipboard } from "@/modules/terminal/lib/terminalClipboard";
 import {
   ArrowRight01Icon,
   Cancel01Icon,
@@ -43,6 +45,7 @@ import {
   Tick02Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import { toast } from "sonner";
 import {
   Fragment,
   useCallback,
@@ -52,7 +55,7 @@ import {
   useState,
 } from "react";
 import { labelFor } from "./lib/tabLabel";
-import type { EditorTab, Tab } from "./lib/useTabs";
+import type { EditorTab, Tab, TerminalTab } from "./lib/useTabs";
 import { NewTabMenu } from "./NewTabMenu";
 
 type Props = {
@@ -470,6 +473,9 @@ export function TabBar({
                     <span className={cn("truncate", isPreview && "italic")}>
                       {labelFor(t)}
                     </span>
+                    {t.kind === "terminal" ? (
+                      <TerminalActivityBadge tab={t} />
+                    ) : null}
                     {t.kind === "editor" && t.dirty ? (
                       <span
                         aria-label="Unsaved changes"
@@ -528,6 +534,7 @@ export function TabBar({
                           />
                           <span className="flex-1">Rename</span>
                         </ContextMenuItem>
+                        <TerminalActivityMenu tab={t} />
                         {tabs.length > 1 && (
                           <>
                             <ContextMenuSeparator />
@@ -598,6 +605,89 @@ export function TabBar({
       </div>
     </div>
   );
+}
+
+function TerminalActivityBadge({ tab }: { tab: TerminalTab }) {
+  const activity = useTerminalActivity(tab.activeLeafId);
+  if (activity.state === "idle") return null;
+  const label =
+    activity.state === "running"
+      ? "Terminal task running"
+      : activity.state === "success"
+        ? "Last terminal task completed successfully"
+        : activity.state === "failed"
+          ? "Last terminal task failed"
+          : "Last terminal task exited with unknown status";
+  const color =
+    activity.state === "running"
+      ? "bg-primary animate-pulse"
+      : activity.state === "success"
+        ? "bg-emerald-500"
+        : activity.state === "failed"
+          ? "bg-destructive"
+          : "bg-muted-foreground";
+  return (
+    <>
+      <span
+        aria-hidden
+        className={cn("size-1.5 shrink-0 rounded-full", color)}
+      />
+      <span className="sr-only">{label}</span>
+      {activity.state === "running" && activity.process ? (
+        <span className="max-w-20 truncate font-mono text-[10px] text-muted-foreground">
+          {activity.process}
+        </span>
+      ) : null}
+      {activity.state === "running" && activity.startedAt ? (
+        <span className="shrink-0 tabular-nums text-[10px] text-muted-foreground">
+          {formatRuntime(Date.now() - activity.startedAt)}
+        </span>
+      ) : null}
+      {activity.ports[0] ? (
+        <span className="shrink-0 font-mono text-[10px] text-muted-foreground">
+          :{activity.ports[0]}
+        </span>
+      ) : null}
+    </>
+  );
+}
+
+function TerminalActivityMenu({ tab }: { tab: TerminalTab }) {
+  const activity = useTerminalActivity(tab.activeLeafId);
+  const copyPid = async () => {
+    if (activity.pid === null) return;
+    if (await writeTerminalClipboard(String(activity.pid))) {
+      toast.success("Process ID copied", {
+        id: `terminal-pid-${tab.activeLeafId}`,
+      });
+    } else {
+      toast.error("Could not copy process ID", {
+        id: `terminal-pid-${tab.activeLeafId}`,
+      });
+    }
+  };
+  return (
+    <ContextMenuItem
+      className="gap-2 rounded-xl px-2.5 py-1.5 text-[13px]"
+      disabled={activity.pid === null}
+      onSelect={() => void copyPid()}
+    >
+      <span className="flex-1">Copy process ID</span>
+      {activity.pid !== null ? (
+        <span className="font-mono text-[11px] text-muted-foreground">
+          {activity.pid}
+        </span>
+      ) : null}
+    </ContextMenuItem>
+  );
+}
+
+function formatRuntime(ms: number): string {
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  const minutes = Math.floor(seconds / 60);
+  return minutes
+    ? `${minutes}:${String(seconds % 60).padStart(2, "0")}`
+    : `${seconds}s`;
 }
 
 function DropIndicator() {

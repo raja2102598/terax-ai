@@ -5,6 +5,7 @@ import {
 } from "@/components/ui/resizable";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { toast } from "sonner";
 import { consumeLaunchFiles, getLaunchDir } from "@/lib/launchDir";
 import { quoteShellArg } from "@/lib/shellQuote";
 import { usePresence } from "@/lib/usePresence";
@@ -909,8 +910,24 @@ export default function App() {
       "terminal.toggleInput": () =>
         window.dispatchEvent(new CustomEvent(TOGGLE_BLOCK_INPUT_EVENT)),
       "terminal.copyFull": () => {
-        if (activeLeafId != null)
-          void terminalRefs.current.get(activeLeafId)?.copyFull();
+        if (activeLeafId != null) {
+          void terminalRefs.current
+            .get(activeLeafId)
+            ?.copyFull()
+            .then((result) => {
+              if (result === "copied") {
+                toast.success("Full terminal copied", {
+                  id: "terminal-copy-full",
+                });
+              } else if (result === "empty") {
+                toast.info("Nothing to copy", { id: "terminal-copy-full" });
+              } else {
+                toast.error("Could not copy terminal output", {
+                  id: "terminal-copy-full",
+                });
+              }
+            });
+        }
       },
       "terminal.scrollTop": () =>
         activeLeafId != null
@@ -921,12 +938,36 @@ export default function App() {
           ? terminalRefs.current.get(activeLeafId)?.scrollToBottom()
           : undefined,
       "blocks.copyOutput": () => {
-        if (activeLeafId != null)
-          void terminalRefs.current.get(activeLeafId)?.copyCurrentBlock();
+        if (activeLeafId != null) {
+          void terminalRefs.current
+            .get(activeLeafId)
+            ?.copyCurrentBlock()
+            .then((result) => {
+              if (result === "copied") {
+                toast.success("Command block output copied", {
+                  id: "terminal-copy-block",
+                });
+              } else if (result === "empty") {
+                toast.info("No command block output to copy", {
+                  id: "terminal-copy-block",
+                });
+              } else {
+                toast.error("Could not copy command block output", {
+                  id: "terminal-copy-block",
+                });
+              }
+            });
+        }
       },
       "blocks.selectOutput": () =>
         activeLeafId != null
-          ? terminalRefs.current.get(activeLeafId)?.selectCurrentBlock()
+          ? (() => {
+              if (
+                !terminalRefs.current.get(activeLeafId)?.selectCurrentBlock()
+              ) {
+                toast.info("No command block output to select");
+              }
+            })()
           : undefined,
       "blocks.prev": () => navigateFocusedBlocks(-1),
       "blocks.next": () => navigateFocusedBlocks(1),

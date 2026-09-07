@@ -74,6 +74,7 @@ export type BlockDecorationsOptions = {
   onMode?: (mode: BlockMode) => void;
   onViewport?: () => void;
   onCommand?: (command: string) => void;
+  onCommandFinished?: (exitCode: number | null) => void;
 };
 
 export class BlockDecorations {
@@ -92,6 +93,7 @@ export class BlockDecorations {
   private readonly onMode?: (mode: BlockMode) => void;
   private readonly onViewport?: () => void;
   private readonly onCommand?: (command: string) => void;
+  private readonly onCommandFinished?: (exitCode: number | null) => void;
   private viewportRaf: number | null = null;
 
   constructor(
@@ -102,6 +104,7 @@ export class BlockDecorations {
     this.onMode = opts?.onMode;
     this.onViewport = opts?.onViewport;
     this.onCommand = opts?.onCommand;
+    this.onCommandFinished = opts?.onCommandFinished;
     this.term.options.cursorInactiveStyle = "none";
     const osc133 = term.parser.registerOscHandler(133, (data) => {
       this.onOsc133(data);
@@ -374,9 +377,11 @@ export class BlockDecorations {
     this.scheduleViewport();
   }
 
-  selectCurrentBlock(): void {
+  selectCurrentBlock(): boolean {
     const id = this.selectedId ?? this.entries[this.entries.length - 1]?.id;
-    if (id) this.selectBlock(id);
+    if (!id) return false;
+    this.selectBlock(id);
+    return true;
   }
 
   readCurrentBlock(): BlockContext | null {
@@ -517,6 +522,7 @@ export class BlockDecorations {
     if (!lb) return;
     this.live = null;
     const exit = parseExitCode(codeStr);
+    this.onCommandFinished?.(exit);
     const ok = exit === 0 || exit === null;
     const endMarker = this.term.registerMarker(0);
     if (!endMarker) {

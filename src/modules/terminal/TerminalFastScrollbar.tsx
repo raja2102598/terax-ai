@@ -18,6 +18,7 @@ import {
   type TerminalScrollState,
   thumbMetrics,
 } from "./lib/fastScroll";
+import { writeTerminalClipboard } from "./lib/terminalClipboard";
 
 export type ScrollMarker = { line: number; failed: boolean; label: string };
 
@@ -35,10 +36,9 @@ type Props = {
 
 async function copyText(text: string | null, label: string) {
   if (!text) return toast.info("Nothing to copy");
-  try {
-    await navigator.clipboard.writeText(text);
+  if (await writeTerminalClipboard(text)) {
     toast.success(`${label} copied · ${text.split("\n").length} lines`);
-  } catch {
+  } else {
     toast.error("Clipboard access was denied");
   }
 }
@@ -52,7 +52,7 @@ function saveTranscript(text: string | null) {
   a.download = `terminal-${new Date().toISOString().replace(/[:.]/g, "-")}.txt`;
   a.click();
   URL.revokeObjectURL(url);
-  toast.success("Terminal transcript exported");
+  toast.success("Terminal transcript download started");
 }
 
 export function TerminalFastScrollbar({

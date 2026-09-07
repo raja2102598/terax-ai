@@ -13,6 +13,7 @@ import { BlockWatermark } from "./block/BlockWatermark";
 import {
   focusLeafInput,
   submitToLeaf,
+  type TerminalCopyResult,
   useTerminalSession,
 } from "./lib/useTerminalSession";
 import { TerminalFastScrollbar } from "./TerminalFastScrollbar";
@@ -22,9 +23,9 @@ export type TerminalPaneHandle = {
   focus: () => void;
   getBuffer: (maxLines?: number) => string | null;
   getSelection: () => string | null;
-  copyFull: () => Promise<boolean>;
-  copyCurrentBlock: () => Promise<boolean>;
-  selectCurrentBlock: () => void;
+  copyFull: () => Promise<TerminalCopyResult>;
+  copyCurrentBlock: () => Promise<TerminalCopyResult>;
+  selectCurrentBlock: () => boolean;
   scrollToTop: () => void;
   scrollToBottom: () => void;
 };

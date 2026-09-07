@@ -1,4 +1,5 @@
 import { ensureMonoFontsLoaded } from "@/lib/fonts";
+import { osNotify } from "@/modules/agents/lib/notify";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import { invoke } from "@tauri-apps/api/core";
 import type { SearchAddon } from "@xterm/addon-search";
@@ -56,12 +57,17 @@ import {
   setSlotFocused,
 } from "./rendererPool";
 import { useTerminalFont } from "./useTerminalFont";
+import { toast } from "sonner";
+import { writeTerminalClipboard } from "./terminalClipboard";
+import { clearTerminalActivity, reportTerminalActivity } from "./activity";
 
 type Callbacks = {
   onSearchReady?: (addon: SearchAddon) => void;
   onExit?: (code: number) => void;
   onCwd?: (cwd: string) => void;
 };
+
+export type TerminalCopyResult = "copied" | "empty" | "failed";
 
 type Session = {
   pty: PtySession | null;
@@ -104,6 +110,8 @@ type Session = {
   // OSC 133 C..D window (or blocks running mode): a foreground process owns
   // the terminal, so the leaf must keep its live grid while hidden.
   commandRunning: boolean;
+  commandStartedAt: number | null;
+  activityTimer: ReturnType<typeof setInterval> | null;
   hiddenReleaseTimer: ReturnType<typeof setTimeout> | null;
   spawnFailed: boolean;
 };
@@ -353,6 +361,18 @@ function onLeafCommandState(leafId: number, running: boolean): void {
   const s = sessions.get(leafId);
   if (!s || s.commandRunning === running) return;
   s.commandRunning = running;
+  if (running) {
+    const startedAt = Date.now();
+    s.commandStartedAt = startedAt;
+    reportTerminalActivity(leafId, {
+      type: "command-started",
+      process: null,
+      startedAt,
+    });
+    startActivityMonitor(leafId, s);
+  } else {
+    stopActivityMonitor(s);
+  }
   if (!running) resetAutoSuggestScope(leafId);
   if (!running) {
     scheduleHiddenRelease(leafId, s);
@@ -371,6 +391,69 @@ function onLeafCommandState(leafId: number, running: boolean): void {
       parkLeafSlot(leafId);
     }, 0);
   }
+}
+
+function onLeafCommandFinished(leafId: number, exitCode: number | null): void {
+  const s = sessions.get(leafId);
+  const startedAt = s?.commandStartedAt ?? null;
+  if (s) s.commandStartedAt = null;
+  reportTerminalActivity(leafId, { type: "command-finished", exitCode });
+  if (!s || (s.visibleNow && s.focusedNow)) return;
+  const elapsed = startedAt === null ? 0 : Date.now() - startedAt;
+  const title =
+    exitCode && exitCode !== 0
+      ? "Terminal task failed"
+      : "Terminal task completed";
+  const body =
+    elapsed >= 30_000
+      ? `Finished after ${formatActivityDuration(elapsed)}`
+      : "Finished in the background";
+  if (document.hasFocus()) {
+    if (exitCode && exitCode !== 0)
+      toast.error(title, { description: body, id: `terminal-task-${leafId}` });
+    else if (elapsed >= 30_000)
+      toast.success(title, {
+        description: body,
+        id: `terminal-task-${leafId}`,
+      });
+    return;
+  }
+  void osNotify(title, body);
+}
+
+function formatActivityDuration(ms: number): string {
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  const minutes = Math.floor(seconds / 60);
+  return minutes ? `${minutes}m ${seconds % 60}s` : `${seconds}s`;
+}
+
+type PtyActivity = {
+  process: string | null;
+  pid: number | null;
+  ports: number[];
+};
+
+function startActivityMonitor(leafId: number, s: Session): void {
+  if (s.activityTimer !== null) return;
+  const refresh = () => {
+    if (!s.pty || s.disposed) return;
+    void invoke<PtyActivity>("pty_activity", { id: s.pty.id })
+      .then((activity) =>
+        reportTerminalActivity(leafId, {
+          type: "process-observed",
+          ...activity,
+        }),
+      )
+      .catch(() => {});
+  };
+  refresh();
+  s.activityTimer = setInterval(refresh, 2000);
+}
+
+function stopActivityMonitor(s: Session): void {
+  if (s.activityTimer === null) return;
+  clearInterval(s.activityTimer);
+  s.activityTimer = null;
 }
 
 ensureAgentActivityListener((ptyId) => {
@@ -481,6 +564,8 @@ function ensureSession(
     everSubmitted: false,
     altScreenAtRelease: false,
     commandRunning: false,
+    commandStartedAt: null,
+    activityTimer: null,
     hiddenReleaseTimer: null,
     spawnFailed: false,
   };
@@ -642,8 +727,19 @@ function bindLeafToSlot(leafId: number, s: Session): void {
             const set = blockViewportListeners.get(leafId);
             if (set) for (const l of set) l();
           },
-          onCommand: (command) =>
-            setAutoSuggestCommandContext(leafId, command),
+          onCommand: (command) => {
+            setAutoSuggestCommandContext(leafId, command);
+            onLeafCommandState(leafId, true);
+            reportTerminalActivity(leafId, {
+              type: "command-started",
+              process: command || null,
+              startedAt: Date.now(),
+            });
+          },
+          onCommandFinished: (exitCode) => {
+            onLeafCommandFinished(leafId, exitCode);
+            onLeafCommandState(leafId, false);
+          },
         });
         s.blockDecorations = deco;
         const onGridFocus = () => {
@@ -664,8 +760,11 @@ function bindLeafToSlot(leafId: number, s: Session): void {
       // 7 emitted by untrusted command output (remote SSH, `cat` of an
       // attacker file, etc.).
       const shellState = createShellIntegrationState();
-      const prompt = registerPromptTracker(term, shellState, (running) =>
-        onLeafCommandState(leafId, running),
+      const prompt = registerPromptTracker(
+        term,
+        shellState,
+        (running) => onLeafCommandState(leafId, running),
+        (exitCode) => onLeafCommandFinished(leafId, exitCode),
       );
       const cwd = registerCwdHandler(
         term,
@@ -761,6 +860,8 @@ export async function respawnSession(
   s.pendingInput = "";
   s.altScreenAtRelease = false;
   s.commandRunning = false;
+  s.commandStartedAt = null;
+  stopActivityMonitor(s);
   s.spawnFailed = false;
   cancelHiddenRelease(s);
 
@@ -819,6 +920,7 @@ export function disposeSession(leafId: number): void {
   const s = sessions.get(leafId);
   if (!s) return;
   s.disposed = true;
+  stopActivityMonitor(s);
   cancelHiddenRelease(s);
   disposeLeafSlot(leafId);
   s.hasSlot = false;
@@ -827,6 +929,7 @@ export function disposeSession(leafId: number): void {
   s.pty = null;
   s.pendingInput = "";
   sessions.delete(leafId);
+  clearTerminalActivity(leafId);
   blockViewportListeners.delete(leafId);
   readyLeaves.delete(leafId);
   const waiters = readyWaiters.get(leafId);
@@ -1045,15 +1148,13 @@ export function useTerminalSession({
     [leafId],
   );
 
-  const copyText = useCallback(async (text: string | null) => {
-    if (!text) return false;
-    try {
-      await navigator.clipboard.writeText(text);
-      return true;
-    } catch {
-      return false;
-    }
-  }, []);
+  const copyText = useCallback(
+    async (text: string | null): Promise<TerminalCopyResult> => {
+      if (!text) return "empty";
+      return (await writeTerminalClipboard(text)) ? "copied" : "failed";
+    },
+    [],
+  );
 
   const copyFull = useCallback(
     () => copyText(getBuffer(Number.MAX_SAFE_INTEGER)),
@@ -1070,7 +1171,7 @@ export function useTerminalSession({
   );
 
   const selectCurrentBlock = useCallback(
-    () => sessions.get(leafId)?.blockDecorations?.selectCurrentBlock(),
+    () => sessions.get(leafId)?.blockDecorations?.selectCurrentBlock() ?? false,
     [leafId],
   );
 

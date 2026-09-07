@@ -13,7 +13,8 @@ const web = {
 
 const original = globalThis.navigator;
 const LINUX = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15";
-const MAC = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15";
+const MAC =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15";
 
 function platform(userAgent: string) {
   Object.defineProperty(globalThis, "navigator", {
@@ -74,8 +75,17 @@ describe("terminalClipboard", () => {
     platform(LINUX);
     native.writeText.mockResolvedValue();
     const { writeTerminalClipboard } = await load();
-    await writeTerminalClipboard("copied");
+    await expect(writeTerminalClipboard("copied")).resolves.toBe(true);
     expect(native.writeText).toHaveBeenCalledWith("copied");
     expect(web.writeText).not.toHaveBeenCalled();
+  });
+
+  it("reports failure when neither clipboard transport can write", async () => {
+    platform(LINUX);
+    native.writeText.mockRejectedValue(new Error("no ipc"));
+    web.writeText.mockRejectedValue(new Error("permission denied"));
+    const { writeTerminalClipboard } = await load();
+
+    await expect(writeTerminalClipboard("copied")).resolves.toBe(false);
   });
 });

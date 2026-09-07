@@ -48,6 +48,7 @@ export function registerPromptTracker(
   // Fires on C (process executing) and A/D (back at prompt). Distinct from
   // inCommand, which is already true from B while the user merely types.
   onCommandState?: (running: boolean) => void,
+  onCommandFinished?: (exitCode: number | null) => void,
 ): PromptTracker {
   let marker: IMarker | null = null;
   const d = term.parser.registerOscHandler(133, (data) => {
@@ -68,6 +69,8 @@ export function registerPromptTracker(
     } else if (data.startsWith("D")) {
       // OSC 133 D — command ends.
       if (state) state.inCommand = false;
+      const match = data.match(/^D;(\d+)/);
+      onCommandFinished?.(match ? Number(match[1]) : null);
       onCommandState?.(false);
     }
     return true;
