@@ -5,12 +5,6 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
-    inputs:
-      ubuntu_only:
-        description: "Build only the Ubuntu AppImage/deb/rpm artifacts"
-        required: false
-        default: false
-        type: boolean
 
 jobs:
   publish-tauri:
@@ -35,7 +29,6 @@ jobs:
             rust-target: ""
 
     runs-on: ${{ matrix.platform }}
-    if: ${{ inputs.ubuntu_only != true || matrix.platform == 'ubuntu-22.04' }}
     steps:
       - uses: actions/checkout@v7
 
