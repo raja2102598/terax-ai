@@ -610,6 +610,7 @@ export function TabBar({
 function TerminalActivityBadge({ tab }: { tab: TerminalTab }) {
   const activity = useTerminalActivity(tab.activeLeafId);
   if (activity.state === "idle") return null;
+  const elapsed = activity.startedAt ? Date.now() - activity.startedAt : 0;
   const label =
     activity.state === "running"
       ? "Terminal task running"
@@ -638,9 +639,9 @@ function TerminalActivityBadge({ tab }: { tab: TerminalTab }) {
           {activity.process}
         </span>
       ) : null}
-      {activity.state === "running" && activity.startedAt ? (
+      {activity.state === "running" && elapsed >= 1_000 ? (
         <span className="shrink-0 tabular-nums text-[10px] text-muted-foreground">
-          {formatRuntime(Date.now() - activity.startedAt)}
+          {formatRuntime(elapsed)}
         </span>
       ) : null}
       {activity.ports[0] ? (
