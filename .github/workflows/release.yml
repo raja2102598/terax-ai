@@ -13,18 +13,12 @@ jobs:
       id-token: write
     strategy:
       fail-fast: false
+      # Linux-only releases. The macOS and Windows legs are intentionally not
+      # built; the platform-conditional steps below are kept so re-adding an
+      # entry here is all it takes to bring a platform back.
       matrix:
         include:
-          - platform: macos-latest
-            args: --target aarch64-apple-darwin
-            rust-target: aarch64-apple-darwin
-          - platform: macos-latest
-            args: --target x86_64-apple-darwin
-            rust-target: x86_64-apple-darwin
           - platform: ubuntu-22.04
-            args: ""
-            rust-target: ""
-          - platform: windows-latest
             args: ""
             rust-target: ""
 
@@ -243,12 +237,10 @@ jobs:
             $env:MSI_REAL_PATH "$($env:MSI_REAL_PATH).sig" `
             --clobber --repo $env:GITHUB_REPOSITORY
 
-  # Patch the re-signed AppImage and SignPath-signed Windows signatures into the
-  # combined updater manifest. Runs once, after every matrix leg has finished
-  # merging its platform into latest.json, so it operates on the full manifest
-  # and cannot be clobbered by a parallel upload. Both linux keys point at the
-  # AppImage; the three windows keys are patched from the minisign signatures
-  # regenerated over the Authenticode-signed installers.
+  # Patch the re-signed AppImage signature into the updater manifest. Runs
+  # once, after the matrix leg has merged its platform into latest.json, so it
+  # operates on the full manifest and cannot be clobbered by a parallel upload.
+  # Releases are Linux-only, so only the linux keys are patched here.
   patch-updater-manifest:
     needs: publish-tauri
     if: startsWith(github.ref, 'refs/tags/')
@@ -256,7 +248,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Patch latest.json with re-signed AppImage and Windows signatures
+      - name: Patch latest.json with the re-signed AppImage signature
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -265,51 +257,27 @@ jobs:
 
           gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
             --pattern "latest.json" \
-            --pattern "*_amd64.AppImage.sig" \
-            --pattern "*_x64-setup.exe.sig" \
-            --pattern "*_x64_en-US.msi.sig" --clobber
+            --pattern "*_amd64.AppImage.sig" --clobber
 
           APP_SIG=$(cat ./*_amd64.AppImage.sig)
-          EXE_SIG=$(cat ./*_x64-setup.exe.sig)
-          MSI_SIG=$(cat ./*_x64_en-US.msi.sig)
 
           # Re-signing an artifact re-uploads it with --clobber, which deletes
           # and recreates the asset under a new id. tauri-action baked the old
-          # asset-id API urls into latest.json, so we also rewrite the urls of
-          # the re-signed artifacts to the tag+filename download url, which is
-          # stable across clobbers. Filenames come from the .sig names.
+          # asset-id API urls into latest.json, so we also rewrite the url of
+          # the re-signed artifact to the tag+filename download url, which is
+          # stable across clobbers. The filename comes from the .sig name.
           APP_FILE=$(basename "$(ls ./*_amd64.AppImage.sig)" .sig)
-          EXE_FILE=$(basename "$(ls ./*_x64-setup.exe.sig)" .sig)
-          MSI_FILE=$(basename "$(ls ./*_x64_en-US.msi.sig)" .sig)
           DL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}"
 
-          jq -e 'has("platforms") and (.platforms | has("linux-x86_64")
-            and has("windows-x86_64") and has("windows-x86_64-msi")
-            and has("windows-x86_64-nsis"))' latest.json >/dev/null \
+          jq -e 'has("platforms") and (.platforms | has("linux-x86_64"))' \
+            latest.json >/dev/null \
             || { echo "latest.json missing an expected platform key"; exit 1; }
 
-          # The generic windows-x86_64 key mirrors whichever installer Tauri
-          # picked as primary; decode its current signature to see which file it
-          # references so the correct regenerated signature and url are used.
-          GEN_FILE=$(jq -r '.platforms["windows-x86_64"].signature' latest.json \
-            | base64 -d | grep -oE 'file:[^[:space:]]+' | head -n1)
-          GEN_FILE=${GEN_FILE#file:}
-          case "$GEN_FILE" in
-            *.msi) WIN_GEN="$MSI_SIG" ;;
-            *)     WIN_GEN="$EXE_SIG" ;;
-          esac
-
-          jq --arg app "$APP_SIG" --arg gen "$WIN_GEN" \
-             --arg msi "$MSI_SIG" --arg nsis "$EXE_SIG" \
-             --arg appurl "$DL/$APP_FILE" --arg genurl "$DL/$GEN_FILE" \
-             --arg msiurl "$DL/$MSI_FILE" --arg exeurl "$DL/$EXE_FILE" '
+          jq --arg app "$APP_SIG" --arg appurl "$DL/$APP_FILE" '
             .platforms["linux-x86_64"] += {signature: $app, url: $appurl}
             | (if .platforms["linux-x86_64-appimage"]
                then .platforms["linux-x86_64-appimage"] += {signature: $app, url: $appurl}
                else . end)
-            | .platforms["windows-x86_64"] += {signature: $gen, url: $genurl}
-            | .platforms["windows-x86_64-msi"] += {signature: $msi, url: $msiurl}
-            | .platforms["windows-x86_64-nsis"] += {signature: $nsis, url: $exeurl}
           ' latest.json > latest.json.tmp
           mv latest.json.tmp latest.json
 
