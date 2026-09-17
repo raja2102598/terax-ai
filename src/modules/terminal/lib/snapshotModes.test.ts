@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { dropAlternateScreen, stripDeadProgramModes } from "./snapshotModes";
+import {
+  dropAlternateScreen,
+  sanitizeDiskSnapshot,
+  stripDeadProgramModes,
+} from "./snapshotModes";
 
 const ESC = "\x1b";
 
@@ -106,5 +110,25 @@ describe("dropAlternateScreen", () => {
     const snapshot = `out${ESC}[?1004h${ESC}[?1049h${ESC}[Htui`;
     const clean = stripDeadProgramModes(dropAlternateScreen(snapshot));
     expect(clean).toBe("out");
+  });
+});
+
+describe("sanitizeDiskSnapshot", () => {
+  it("closes with an SGR reset so the new prompt does not inherit a dead pen", () => {
+    // SerializeAddon stops at the cells without restoring the pen: a program
+    // that died with conceal active leaves the snapshot in that state, and the
+    // fresh shell's prompt would be invisible.
+    expect(sanitizeDiskSnapshot(`${ESC}[8mhidden`)).toBe(
+      `${ESC}[8mhidden${ESC}[0m`,
+    );
+  });
+
+  it("applies the alt-screen drop and the mode strip together", () => {
+    const snapshot = `out${ESC}[?1049h${ESC}[Htui${ESC}[?1004h`;
+    expect(sanitizeDiskSnapshot(snapshot)).toBe(`out${ESC}[0m`);
+  });
+
+  it("leaves an empty snapshot empty rather than emitting a bare reset", () => {
+    expect(sanitizeDiskSnapshot(`${ESC}[?1004h`)).toBe("");
   });
 });

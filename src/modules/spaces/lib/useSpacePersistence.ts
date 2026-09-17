@@ -11,6 +11,7 @@ import {
   deleteSnapshot,
   putSnapshot,
 } from "@/modules/terminal/lib/snapshotStore";
+import { setPrivateLeaves } from "@/modules/terminal/lib/useTerminalSession";
 import { leafIds } from "@/modules/terminal/lib/panes";
 
 const DEBOUNCE_MS = 3000;
@@ -119,6 +120,17 @@ export function useSpacePersistence({
       void saveState(spaceId, { tabs: serialized, activeTabIndex });
     }
   }, []);
+
+  // Synced on every tabs change, not on the debounced flush: the renderer pool
+  // writes snapshots whenever it steals or reaps a slot, which can happen long
+  // before the next flush.
+  useEffect(() => {
+    const ids: number[] = [];
+    for (const t of tabs) {
+      if (t.kind === "terminal" && t.private) ids.push(...leafIds(t.paneTree));
+    }
+    setPrivateLeaves(ids);
+  }, [tabs]);
 
   useEffect(() => {
     if (!enabled) return;

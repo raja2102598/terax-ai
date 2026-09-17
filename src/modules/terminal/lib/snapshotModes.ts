@@ -81,3 +81,18 @@ export function dropAlternateScreen(snapshot: string): string {
   const at = snapshot.search(ALT_SCREEN_ENTER);
   return at === -1 ? snapshot : snapshot.slice(0, at);
 }
+
+/**
+ * Prepare a snapshot read back from disk for replay into a brand-new pty.
+ *
+ * Drops the dead program's alternate screen, strips the modes it left behind,
+ * and closes with an SGR reset. That last part matters because SerializeAddon
+ * stops at the cell contents without restoring the pen: a program that died
+ * with conceal, inverse or a colour still active leaves the snapshot ending in
+ * that state, and the fresh shell's prompt inherits it -- with conceal, the
+ * prompt and everything typed at it are invisible.
+ */
+export function sanitizeDiskSnapshot(snapshot: string): string {
+  const cleaned = stripDeadProgramModes(dropAlternateScreen(snapshot));
+  return cleaned === "" ? cleaned : `${cleaned}\x1b[0m`;
+}

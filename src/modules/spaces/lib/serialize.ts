@@ -105,13 +105,23 @@ export function serializeTabs(tabs: Tab[]): SerializedTab[] {
  * so freshly allocated ids can never collide with a restored pane -- a
  * collision hands the new pane another pane's terminal snapshot.
  */
+/**
+ * Only a positive safe integer is usable as a leaf id: it reaches openPty as a
+ * paneId whose Rust command expects Option<u32>, and a value past 2^53 would
+ * freeze the shared allocator, since `++` no longer advances there and every
+ * later tab would be handed the same id.
+ */
+function isUsableLeafId(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+}
+
 export function maxSerializedLeafId(tabs: SerializedTab[]): number {
   if (!Array.isArray(tabs)) return 0;
   let max = 0;
   const walk = (node: SerializedNode): void => {
     if (!node) return;
     if (node.kind === "leaf") {
-      if (typeof node.id === "number" && node.id > max) max = node.id;
+      if (isUsableLeafId(node.id) && node.id > max) max = node.id;
       return;
     }
     if (Array.isArray(node.children)) for (const c of node.children) walk(c);
@@ -171,14 +181,10 @@ function claimId(
   allocId: () => number,
   claimed: Set<number>,
 ): number {
-  // Only a positive safe integer is usable: the id reaches openPty as a paneId
-  // whose Rust command expects Option<u32>, and a string id would additionally
-  // stay distinct in this claim set while colliding with numeric ids in DOM
-  // attributes. Anything else on disk is treated as absent.
-  const usable =
-    typeof persisted === "number" &&
-    Number.isSafeInteger(persisted) &&
-    persisted > 0;
+  // A string id would additionally stay distinct in this claim set while
+  // colliding with numeric ids in DOM attributes. Anything unusable on disk is
+  // treated as absent.
+  const usable = isUsableLeafId(persisted);
   let id = usable && !claimed.has(persisted) ? persisted : allocId();
   while (claimed.has(id)) id = allocId();
   claimed.add(id);

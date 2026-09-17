@@ -25,7 +25,7 @@ import {
   registerPromptTracker,
 } from "./osc-handlers";
 import { openPty, type PtySession } from "./pty-bridge";
-import { dropAlternateScreen, stripDeadProgramModes } from "./snapshotModes";
+import { sanitizeDiskSnapshot } from "./snapshotModes";
 import { deleteSnapshot, getSnapshot, putSnapshot } from "./snapshotStore";
 import "../block/block.css";
 import type { ScrollMarker } from "../TerminalFastScrollbar";
@@ -523,6 +523,11 @@ configureRendererPool({
     if (out.cols > 0) s.cols = out.cols;
     if (out.rows > 0) s.rows = out.rows;
     s.altScreenAtRelease = out.altScreen;
+    // Kept in memory above so the pane can be rebound within this session, but
+    // never written: this runs whenever the pool steals or reaps a slot, which
+    // is the path that put private buffers on disk behind the persistence
+    // layer's back.
+    if (privateLeaves.has(leafId)) return;
     void putSnapshot(leafId, out);
   },
 });
@@ -584,7 +589,7 @@ function ensureSession(
         // the prompt; replaying the alternate-screen switch would strand the
         // fresh shell inside a dead TUI's buffer.
         session.snapshot = snap.snapshot
-          ? stripDeadProgramModes(dropAlternateScreen(snap.snapshot))
+          ? sanitizeDiskSnapshot(snap.snapshot)
           : snap.snapshot;
         if (snap.cols > 0) session.cols = snap.cols;
         if (snap.rows > 0) session.rows = snap.rows;
@@ -925,6 +930,25 @@ export async function leafHasForegroundProcess(
     );
     return false;
   }
+}
+
+/**
+ * Leaves belonging to private terminals. Their buffers must never reach disk:
+ * a private tab is excluded from saved state, so a persisted snapshot both
+ * leaks its contents and strands a buffer under an id no saved tab claims,
+ * which a later pane can allocate and display.
+ */
+const privateLeaves = new Set<number>();
+
+/** Replace the set of leaves whose buffers must stay off disk. */
+export function setPrivateLeaves(ids: Iterable<number>): void {
+  const next = new Set(ids);
+  for (const id of next) {
+    // Drop anything already written before the tab was marked private.
+    if (!privateLeaves.has(id)) void deleteSnapshot(id);
+  }
+  privateLeaves.clear();
+  for (const id of next) privateLeaves.add(id);
 }
 
 /** Leaves with a live session right now. */

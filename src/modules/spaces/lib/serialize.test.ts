@@ -288,6 +288,25 @@ describe("maxSerializedLeafId", () => {
     expect(maxSerializedLeafId([{ kind: "editor", path: "/a.ts" }])).toBe(0);
   });
 
+  it("ignores ids too large to be safe integers", () => {
+    // 1e100 would push the shared allocator somewhere `++` cannot advance,
+    // handing every later tab the same id.
+    const serialized = [
+      { kind: "terminal", tree: { kind: "leaf", id: 1e100 } },
+      { kind: "terminal", tree: { kind: "leaf", id: 12 } },
+    ] as unknown as SerializedTab[];
+    expect(maxSerializedLeafId(serialized)).toBe(12);
+  });
+
+  it("ignores negative, fractional and string ids", () => {
+    const serialized = [
+      { kind: "terminal", tree: { kind: "leaf", id: -5 } },
+      { kind: "terminal", tree: { kind: "leaf", id: 1.5 } },
+      { kind: "terminal", tree: { kind: "leaf", id: "9" } },
+    ] as unknown as SerializedTab[];
+    expect(maxSerializedLeafId(serialized)).toBe(0);
+  });
+
   it("returns 0 for corrupted input without throwing", () => {
     expect(maxSerializedLeafId([])).toBe(0);
     expect(maxSerializedLeafId(null as unknown as SerializedTab[])).toBe(0);
