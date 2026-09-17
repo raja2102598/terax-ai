@@ -132,9 +132,10 @@ function hydrateNode(
   node: SerializedNode,
   allocId: () => number,
   acc: { activeLeafId: number | null },
+  claimed: Set<number>,
 ): PaneNode {
   if (node.kind === "leaf") {
-    const id = node.id ?? allocId();
+    const id = claimId(node.id, allocId, claimed);
     if (node.active && acc.activeLeafId === null) acc.activeLeafId = id;
     return {
       kind: "leaf",
@@ -142,18 +143,48 @@ function hydrateNode(
       ...(node.cwd !== undefined && { cwd: node.cwd }),
     };
   }
-  const children = node.children.map((c) => hydrateNode(c, allocId, acc));
-  if (children.length === 0) return { kind: "leaf", id: allocId() };
+  const children = node.children.map((c) =>
+    hydrateNode(c, allocId, acc, claimed),
+  );
+  if (children.length === 0)
+    return { kind: "leaf", id: claimId(undefined, allocId, claimed) };
   if (children.length === 1) return children[0];
-  return { kind: "split", id: allocId(), dir: node.dir, children };
+  return {
+    kind: "split",
+    id: claimId(undefined, allocId, claimed),
+    dir: node.dir,
+    children,
+  };
+}
+
+/**
+ * Take the persisted id when it is still free, otherwise mint a fresh one.
+ *
+ * Ids must be unique across the whole boot, not just within one tree: a space
+ * emptied by moving its last tab out is never re-saved, so its stale state
+ * still claims a leaf the destination space now also claims. Sessions and
+ * renderer slots are keyed solely by leaf id, so a duplicate would put two
+ * panes on one pty.
+ */
+function claimId(
+  persisted: number | undefined,
+  allocId: () => number,
+  claimed: Set<number>,
+): number {
+  let id =
+    persisted !== undefined && !claimed.has(persisted) ? persisted : allocId();
+  while (claimed.has(id)) id = allocId();
+  claimed.add(id);
+  return id;
 }
 
 function hydrateTree(
   tree: SerializedNode,
   allocId: () => number,
+  claimed: Set<number>,
 ): HydratedTree {
   const acc: { activeLeafId: number | null } = { activeLeafId: null };
-  const paneTree = hydrateNode(tree, allocId, acc);
+  const paneTree = hydrateNode(tree, allocId, acc, claimed);
   const leaves = collectLeaves(paneTree);
   const activeLeafId = acc.activeLeafId ?? leaves[0]?.id ?? allocId();
   const firstLeafCwd =
@@ -170,10 +201,15 @@ function hydrateTab(
   s: SerializedTab,
   spaceId: string,
   allocId: () => number,
+  claimed: Set<number>,
 ): Tab | null {
   switch (s.kind) {
     case "terminal": {
-      const { tree, activeLeafId, firstLeafCwd } = hydrateTree(s.tree, allocId);
+      const { tree, activeLeafId, firstLeafCwd } = hydrateTree(
+        s.tree,
+        allocId,
+        claimed,
+      );
       const title =
         s.customTitle ??
         (firstLeafCwd ? basename(firstLeafCwd) : s.blocks ? "blocks" : "shell");
@@ -246,12 +282,14 @@ export function hydrateTabs(
   serialized: SerializedTab[],
   spaceId: string,
   allocId: () => number,
+  /** Ids already taken. Share one set across spaces so restores cannot collide. */
+  claimed: Set<number> = new Set(),
 ): Tab[] {
   if (!Array.isArray(serialized)) return [];
   const out: Tab[] = [];
   for (const s of serialized) {
     try {
-      const tab = hydrateTab(s, spaceId, allocId);
+      const tab = hydrateTab(s, spaceId, allocId, claimed);
       if (tab) out.push(tab);
     } catch {
       // Skip corrupted entries rather than failing the whole restore.

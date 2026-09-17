@@ -20,6 +20,10 @@ describe("stripInputReportingModes", () => {
     expect(stripInputReportingModes(snapshot)).toBe("");
   });
 
+  it("drops application keypad, which SerializeAddon emits as [?66h", () => {
+    expect(stripInputReportingModes(`${ESC}[?66h`)).toBe("");
+  });
+
   it("keeps rendering modes that legitimately describe the restored buffer", () => {
     const snapshot = `${ESC}[?6h${ESC}[?45h${ESC}[?7l${ESC}[4h`;
     expect(stripInputReportingModes(snapshot)).toBe(snapshot);
@@ -31,7 +35,9 @@ describe("stripInputReportingModes", () => {
   });
 
   it("strips only the offending params from a combined set", () => {
-    expect(stripInputReportingModes(`${ESC}[?1000;1006;45h`)).toBe(`${ESC}[?45h`);
+    expect(stripInputReportingModes(`${ESC}[?1000;1006;45h`)).toBe(
+      `${ESC}[?45h`,
+    );
   });
 
   it("does not confuse a mode whose digits prefix another", () => {
@@ -47,6 +53,8 @@ describe("stripInputReportingModes", () => {
   });
 
   it("leaves a snapshot with no private modes untouched", () => {
-    expect(stripInputReportingModes("plain output\r\n")).toBe("plain output\r\n");
+    expect(stripInputReportingModes("plain output\r\n")).toBe(
+      "plain output\r\n",
+    );
   });
 });

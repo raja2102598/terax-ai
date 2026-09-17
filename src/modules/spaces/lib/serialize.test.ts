@@ -177,6 +177,51 @@ describe("hydrateTabs", () => {
     expect(Math.min(...tabIds)).toBeGreaterThanOrEqual(100);
   });
 
+  it("never hands two leaves the same id, even when disk state repeats one", () => {
+    // A space emptied by moving its last tab out is never re-saved, so its
+    // stale state keeps a leaf the target space now also claims. Sessions and
+    // renderer slots are keyed solely by leaf id, so a duplicate would make two
+    // panes share one pty.
+    const claimed = new Set<number>();
+    const alloc = counter(100);
+    const stale: SerializedTab[] = [
+      { kind: "terminal", tree: { kind: "leaf", id: 7, cwd: "/a" } },
+    ];
+    const moved: SerializedTab[] = [
+      { kind: "terminal", tree: { kind: "leaf", id: 7, cwd: "/a" } },
+    ];
+
+    const a = hydrateTabs(stale, "s1", alloc, claimed);
+    const b = hydrateTabs(moved, "s2", alloc, claimed);
+    const ids = [...a, ...b].flatMap((t) =>
+      t.kind === "terminal" ? leafIdsOf(t.paneTree) : [],
+    );
+
+    expect(ids).toHaveLength(2);
+    expect(new Set(ids).size).toBe(2);
+    expect(ids).toContain(7);
+  });
+
+  it("deduplicates a repeated id inside a single tree", () => {
+    const serialized: SerializedTab[] = [
+      {
+        kind: "terminal",
+        tree: {
+          kind: "split",
+          dir: "row",
+          children: [
+            { kind: "leaf", id: 5 },
+            { kind: "leaf", id: 5 },
+          ],
+        },
+      },
+    ];
+    const [restored] = hydrateTabs(serialized, "s1", counter(100));
+    if (restored.kind !== "terminal") throw new Error("expected terminal tab");
+    const ids = leafIdsOf(restored.paneTree);
+    expect(new Set(ids).size).toBe(2);
+  });
+
   it("returns empty for corrupted input without throwing", () => {
     expect(hydrateTabs([] as SerializedTab[], "s1", counter())).toEqual([]);
     expect(
@@ -220,7 +265,9 @@ describe("maxSerializedLeafId", () => {
   });
 
   it("returns 0 for legacy leaves that carry no id", () => {
-    expect(maxSerializedLeafId([{ kind: "terminal", tree: { kind: "leaf" } }])).toBe(0);
+    expect(
+      maxSerializedLeafId([{ kind: "terminal", tree: { kind: "leaf" } }]),
+    ).toBe(0);
   });
 
   it("ignores non-terminal tabs", () => {

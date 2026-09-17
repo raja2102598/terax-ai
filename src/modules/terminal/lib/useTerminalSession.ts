@@ -923,7 +923,17 @@ export async function leafHasForegroundProcess(
   }
 }
 
+/** Leaves with a live session right now. */
+export function liveSessionLeafIds(): number[] {
+  return [...sessions.keys()];
+}
+
 export function disposeSession(leafId: number): void {
+  // Unconditional: a restored pane stays cold until it is first opened, so
+  // closing one that was never activated has no session here. Returning before
+  // this would strand its snapshot in IndexedDB, where a later pane allocated
+  // the same leaf id would restore a closed pane's buffer.
+  void deleteSnapshot(leafId);
   const s = sessions.get(leafId);
   if (!s) return;
   s.disposed = true;
@@ -947,7 +957,6 @@ export function disposeSession(leafId: number): void {
       w.resolve();
     }
   }
-  void deleteSnapshot(leafId);
 }
 
 type Options = {

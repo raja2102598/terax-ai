@@ -10,10 +10,12 @@
 //
 // The same reasoning covers the rest: mouse tracking would spray escape
 // sequences on click, bracketed paste would wrap pastes the shell does not
-// expect, and application cursor keys would break the arrow keys outright.
+// expect, application cursor keys would break the arrow keys outright, and
+// application keypad would leave the numeric keypad emitting SS3 sequences.
 const INPUT_REPORTING_MODES = new Set([
   1, // DECCKM - application cursor keys
   9, // X10 mouse reporting
+  66, // DECNKM - application keypad
   1000, // VT200 mouse reporting
   1002, // button-event mouse tracking
   1003, // any-event mouse tracking
