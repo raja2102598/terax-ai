@@ -123,14 +123,15 @@ export function useSpacePersistence({
 
   // Synced on every tabs change, not on the debounced flush: the renderer pool
   // writes snapshots whenever it steals or reaps a slot, which can happen long
-  // before the next flush.
+  // before the next flush. Tracking always runs so those writes are blocked
+  // from the first render, but deletion waits for boot -- see setPrivateLeaves.
   useEffect(() => {
     const ids: number[] = [];
     for (const t of tabs) {
       if (t.kind === "terminal" && t.private) ids.push(...leafIds(t.paneTree));
     }
-    setPrivateLeaves(ids);
-  }, [tabs]);
+    setPrivateLeaves(ids, enabled);
+  }, [tabs, enabled]);
 
   useEffect(() => {
     if (!enabled) return;

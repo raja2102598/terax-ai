@@ -940,12 +940,24 @@ export async function leafHasForegroundProcess(
  */
 const privateLeaves = new Set<number>();
 
-/** Replace the set of leaves whose buffers must stay off disk. */
-export function setPrivateLeaves(ids: Iterable<number>): void {
+/**
+ * Replace the set of leaves whose buffers must stay off disk.
+ *
+ * `deleteStored` clears anything already written for a newly private leaf, and
+ * must stay false until boot has reserved the persisted ids: before that, a
+ * private tab opened during startup can hold an id a restored pane still owns a
+ * snapshot under, and deleting it destroys that pane's buffer for good --
+ * boot's keepSnapshot disposal cannot bring it back.
+ */
+export function setPrivateLeaves(
+  ids: Iterable<number>,
+  deleteStored: boolean,
+): void {
   const next = new Set(ids);
-  for (const id of next) {
-    // Drop anything already written before the tab was marked private.
-    if (!privateLeaves.has(id)) void deleteSnapshot(id);
+  if (deleteStored) {
+    for (const id of next) {
+      if (!privateLeaves.has(id)) void deleteSnapshot(id);
+    }
   }
   privateLeaves.clear();
   for (const id of next) privateLeaves.add(id);

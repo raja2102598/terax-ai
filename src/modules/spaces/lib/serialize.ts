@@ -105,14 +105,23 @@ export function serializeTabs(tabs: Tab[]): SerializedTab[] {
  * so freshly allocated ids can never collide with a restored pane -- a
  * collision hands the new pane another pane's terminal snapshot.
  */
+/** pty_open deserializes pane_id as Option<u32> (src-tauri/src/modules/pty/mod.rs). */
+const MAX_LEAF_ID = 0xff_ff_ff_ff;
+
 /**
- * Only a positive safe integer is usable as a leaf id: it reaches openPty as a
- * paneId whose Rust command expects Option<u32>, and a value past 2^53 would
- * freeze the shared allocator, since `++` no longer advances there and every
- * later tab would be handed the same id.
+ * Only a positive integer within the backend's u32 range is usable as a leaf
+ * id. Anything larger survives hydration but fails every pty spawn, and worse,
+ * seeds the shared allocator above the range so every terminal created
+ * afterwards fails too; past 2^53 the allocator stops advancing entirely and
+ * hands out one id forever.
  */
 function isUsableLeafId(value: unknown): value is number {
-  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+  return (
+    typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    value > 0 &&
+    value <= MAX_LEAF_ID
+  );
 }
 
 export function maxSerializedLeafId(tabs: SerializedTab[]): number {

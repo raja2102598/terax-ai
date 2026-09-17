@@ -225,7 +225,7 @@ describe("hydrateTabs", () => {
   it("allocates a fresh id for malformed persisted ids", () => {
     // Disk state can hold a string, a negative, or a fraction; any of those
     // reaching openPty as a paneId leaves the pane unable to spawn.
-    const bad = ["7", -1, 1.5, 0, null, Number.NaN];
+    const bad = ["7", -1, 1.5, 0, null, Number.NaN, 4294967296, 1e100];
     for (const id of bad) {
       const serialized = [
         { kind: "terminal", tree: { kind: "leaf", id } },
@@ -296,6 +296,16 @@ describe("maxSerializedLeafId", () => {
       { kind: "terminal", tree: { kind: "leaf", id: 12 } },
     ] as unknown as SerializedTab[];
     expect(maxSerializedLeafId(serialized)).toBe(12);
+  });
+
+  it("ignores ids beyond the backend's u32 pane_id range", () => {
+    // pty_open takes Option<u32>; anything larger hydrates fine and then fails
+    // every spawn, while also seeding the allocator above the usable range.
+    const serialized = [
+      { kind: "terminal", tree: { kind: "leaf", id: 4294967296 } },
+      { kind: "terminal", tree: { kind: "leaf", id: 4294967295 } },
+    ] as unknown as SerializedTab[];
+    expect(maxSerializedLeafId(serialized)).toBe(4294967295);
   });
 
   it("ignores negative, fractional and string ids", () => {
