@@ -3,7 +3,10 @@ import type { Tab } from "@/modules/tabs";
 import { isSerializableTab, serializeTabs } from "./serialize";
 import { saveState } from "./store";
 import { useSpaces } from "./useSpaces";
-import { forEachSlot, serializeSlot } from "@/modules/terminal/lib/rendererPool";
+import {
+  forEachSlot,
+  serializeSlot,
+} from "@/modules/terminal/lib/rendererPool";
 import { putSnapshot } from "@/modules/terminal/lib/snapshotStore";
 
 const DEBOUNCE_MS = 3000;
@@ -54,6 +57,17 @@ export function useSpacePersistence({
       const arr = groups.get(t.spaceId);
       if (arr) arr.push(t);
       else groups.set(t.spaceId, [t]);
+    }
+
+    // A space whose last tab was moved out produces no group here, so its old
+    // state would stay on disk claiming leaf ids the destination space now
+    // claims too -- and leaf ids key sessions and renderer slots. Re-save it as
+    // empty. Restricted to spaces we have already written a non-empty state for
+    // in this session, so a space the user never opened is never cleared.
+    for (const [spaceId, prev] of last.current) {
+      if (groups.has(spaceId)) continue;
+      if (!prev.json || prev.json === "[]") continue;
+      groups.set(spaceId, []);
     }
 
     for (const [spaceId, group] of groups) {

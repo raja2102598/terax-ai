@@ -47,3 +47,25 @@ export function stripInputReportingModes(snapshot: string): string {
     return kept.length > 0 ? `\x1b[?${kept.join(";")}h` : "";
   });
 }
+
+// SerializeAddon serializes the normal buffer first, then -- when the session
+// was on the alternate screen -- appends `CSI ?1049h`, a cursor home, and the
+// alternate buffer's contents.
+const ALT_SCREEN_ENTER = /\x1b\[\?1049h/;
+
+/**
+ * Cut the alternate-screen section off a snapshot, keeping the normal buffer.
+ *
+ * A fresh shell must start on the normal screen. Replaying the transition would
+ * drop it into the alternate buffer of a program that is no longer running, and
+ * every prompt after that would draw there until something happened to send
+ * `CSI ?1049l` -- with the real normal buffer hidden behind it.
+ *
+ * The dead TUI's final frame is discarded rather than flattened into the normal
+ * buffer: it is a snapshot of a program that no longer exists, and pasting it
+ * above a live prompt reads as real output.
+ */
+export function dropAlternateScreen(snapshot: string): string {
+  const at = snapshot.search(ALT_SCREEN_ENTER);
+  return at === -1 ? snapshot : snapshot.slice(0, at);
+}

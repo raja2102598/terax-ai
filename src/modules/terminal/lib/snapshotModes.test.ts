@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { stripInputReportingModes } from "./snapshotModes";
+import { dropAlternateScreen, stripInputReportingModes } from "./snapshotModes";
 
 const ESC = "\x1b";
 
@@ -56,5 +56,30 @@ describe("stripInputReportingModes", () => {
     expect(stripInputReportingModes("plain output\r\n")).toBe(
       "plain output\r\n",
     );
+  });
+});
+
+describe("dropAlternateScreen", () => {
+  it("drops the alternate-buffer section a TUI left in the snapshot", () => {
+    // SerializeAddon appends `[?1049h[H` plus the alt buffer when the session
+    // was serialized with vim/htop on screen. Replaying that would strand the
+    // fresh shell drawing inside a dead program's alternate buffer.
+    const snapshot = `scrollback line${ESC}[?1049h${ESC}[Hvim contents here`;
+    expect(dropAlternateScreen(snapshot)).toBe("scrollback line");
+  });
+
+  it("keeps a normal-buffer snapshot exactly as it is", () => {
+    const snapshot = `raja@host:~$ ls${ESC}[0m\r\nfoo`;
+    expect(dropAlternateScreen(snapshot)).toBe(snapshot);
+  });
+
+  it("drops everything when the snapshot is entirely alternate buffer", () => {
+    expect(dropAlternateScreen(`${ESC}[?1049h${ESC}[Hhtop`)).toBe("");
+  });
+
+  it("composes with the mode strip without reintroducing either", () => {
+    const snapshot = `out${ESC}[?1004h${ESC}[?1049h${ESC}[Htui`;
+    const clean = stripInputReportingModes(dropAlternateScreen(snapshot));
+    expect(clean).toBe("out");
   });
 });

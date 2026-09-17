@@ -25,7 +25,7 @@ import {
   registerPromptTracker,
 } from "./osc-handlers";
 import { openPty, type PtySession } from "./pty-bridge";
-import { stripInputReportingModes } from "./snapshotModes";
+import { dropAlternateScreen, stripInputReportingModes } from "./snapshotModes";
 import { deleteSnapshot, getSnapshot, putSnapshot } from "./snapshotStore";
 import "../block/block.css";
 import type { ScrollMarker } from "../TerminalFastScrollbar";
@@ -578,16 +578,20 @@ function ensureSession(
     if (!session.snapshot) {
       const snap = await getSnapshot(leafId);
       if (snap && !session.disposed) {
-        // A persisted snapshot always outlives its pty, so the modes captured
-        // in it belong to a program that is already gone. Replaying them onto
-        // the fresh shell is what left focus reporting on and echoed
-        // ^[[I / ^[[O into the prompt after a tab was closed and reopened.
+        // A persisted snapshot always outlives its pty, so everything it
+        // captured belongs to a program that is already gone. Replaying the
+        // modes is what left focus reporting on and echoed ^[[I / ^[[O into
+        // the prompt; replaying the alternate-screen switch would strand the
+        // fresh shell inside a dead TUI's buffer.
         session.snapshot = snap.snapshot
-          ? stripInputReportingModes(snap.snapshot)
+          ? stripInputReportingModes(dropAlternateScreen(snap.snapshot))
           : snap.snapshot;
         if (snap.cols > 0) session.cols = snap.cols;
         if (snap.rows > 0) session.rows = snap.rows;
-        session.altScreenAtRelease = snap.altScreen;
+        // Never propagated from disk: the flag makes bindSlot skip ring replay
+        // and kick a SIGWINCH to make a live TUI repaint, but nothing is live
+        // here and the alternate section has just been dropped.
+        session.altScreenAtRelease = false;
       }
     }
   })();
@@ -928,12 +932,24 @@ export function liveSessionLeafIds(): number[] {
   return [...sessions.keys()];
 }
 
-export function disposeSession(leafId: number): void {
-  // Unconditional: a restored pane stays cold until it is first opened, so
-  // closing one that was never activated has no session here. Returning before
-  // this would strand its snapshot in IndexedDB, where a later pane allocated
-  // the same leaf id would restore a closed pane's buffer.
-  void deleteSnapshot(leafId);
+export type DisposeOptions = {
+  /**
+   * Leave the persisted snapshot in place. Only for tearing down a transient
+   * leaf whose id a restored pane is about to claim: that snapshot belongs to
+   * the pane being restored, not to the session being closed.
+   */
+  keepSnapshot?: boolean;
+};
+
+export function disposeSession(
+  leafId: number,
+  opts: DisposeOptions = {},
+): void {
+  // Deleted before the early return below: a restored pane stays cold until it
+  // is first opened, so closing one that was never activated has no session
+  // here, and returning first would strand its snapshot in IndexedDB where a
+  // later pane on the same leaf id would restore a closed pane's buffer.
+  if (!opts.keepSnapshot) void deleteSnapshot(leafId);
   const s = sessions.get(leafId);
   if (!s) return;
   s.disposed = true;

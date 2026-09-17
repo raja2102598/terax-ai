@@ -99,7 +99,13 @@ export function useSpacesBoot({
         // otherwise a tab opened during startup keeps a live session on a leaf
         // id that a restored pane is about to claim, and the restored pane
         // would adopt that running pty instead of loading its own snapshot.
-        for (const leafId of liveSessionLeafIds()) disposeSession(leafId);
+        // keepSnapshot: these leaf ids may be the very ids restored panes are
+        // about to claim, and the snapshots stored under them belong to those
+        // panes. A pre-boot tab never persists a snapshot of its own, because
+        // persistence stays gated until boot completes.
+        for (const leafId of liveSessionLeafIds()) {
+          disposeSession(leafId, { keepSnapshot: true });
+        }
 
         // One claim set for every space: a space emptied by moving its last
         // tab out is never re-saved, so two spaces on disk can still name the
