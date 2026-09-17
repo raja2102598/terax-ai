@@ -25,6 +25,7 @@ import {
   registerPromptTracker,
 } from "./osc-handlers";
 import { openPty, type PtySession } from "./pty-bridge";
+import { stripInputReportingModes } from "./snapshotModes";
 import { deleteSnapshot, getSnapshot, putSnapshot } from "./snapshotStore";
 import "../block/block.css";
 import type { ScrollMarker } from "../TerminalFastScrollbar";
@@ -577,7 +578,13 @@ function ensureSession(
     if (!session.snapshot) {
       const snap = await getSnapshot(leafId);
       if (snap && !session.disposed) {
-        session.snapshot = snap.snapshot;
+        // A persisted snapshot always outlives its pty, so the modes captured
+        // in it belong to a program that is already gone. Replaying them onto
+        // the fresh shell is what left focus reporting on and echoed
+        // ^[[I / ^[[O into the prompt after a tab was closed and reopened.
+        session.snapshot = snap.snapshot
+          ? stripInputReportingModes(snap.snapshot)
+          : snap.snapshot;
         if (snap.cols > 0) session.cols = snap.cols;
         if (snap.rows > 0) session.rows = snap.rows;
         session.altScreenAtRelease = snap.altScreen;
