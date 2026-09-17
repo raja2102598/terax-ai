@@ -615,6 +615,14 @@ export function useTabs(initial?: Partial<TerminalTab>) {
 
   const allocId = useCallback(() => nextIdRef.current++, []);
 
+  // Restored panes keep the ids they were saved under, so the counter has to
+  // start above them; otherwise a fresh tab is minted onto a restored pane's id
+  // and picks up its terminal snapshot.
+  const reserveIds = useCallback((throughId: number) => {
+    if (!Number.isFinite(throughId)) return;
+    nextIdRef.current = Math.max(nextIdRef.current, Math.floor(throughId) + 1);
+  }, []);
+
   const markBooted = useCallback(() => setBooted(true), []);
 
   const setActiveSpaceForNewTabs = useCallback((spaceId: string) => {
@@ -1409,6 +1417,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     activeId,
     setActiveId,
     allocId,
+    reserveIds,
     booted,
     replaceTabs,
     moveTabToSpace,

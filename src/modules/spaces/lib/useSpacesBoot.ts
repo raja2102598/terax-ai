@@ -6,7 +6,11 @@ import { isLeaf, type PaneNode } from "@/modules/terminal/lib/panes";
 import { parseWorkspaceScopeKey, type WorkspaceEnv } from "@/modules/workspace";
 import { useEffect, useRef } from "react";
 import { activeSpaceEnv, freshTabCwd } from "./activeSpace";
-import { freshTerminalTab, hydrateTabs } from "./serialize";
+import {
+  freshTerminalTab,
+  hydrateTabs,
+  maxSerializedLeafId,
+} from "./serialize";
 import { loadAll, type SpaceMeta, saveActiveId, saveSpacesList } from "./store";
 import { useSpaces } from "./useSpaces";
 
@@ -15,6 +19,7 @@ type Params = {
   launchCwd: string | null;
   home: string | null;
   allocId: () => number;
+  reserveIds: (throughId: number) => void;
   replaceTabs: (tabs: Tab[], activeId: number) => void;
   markBooted: () => void;
   setActiveSpaceForNewTabs: (id: string) => void;
@@ -39,6 +44,7 @@ export function useSpacesBoot({
   launchCwd,
   home,
   allocId,
+  reserveIds,
   replaceTabs,
   markBooted,
   setActiveSpaceForNewTabs,
@@ -76,6 +82,12 @@ export function useSpacesBoot({
           setActiveSpaceForNewTabs(DEFAULT_SPACE_ID);
           useSpaces.getState().hydrate([meta], DEFAULT_SPACE_ID);
           return;
+        }
+
+        // Claim every persisted leaf id before allocating anything, so restored
+        // panes and freshly minted tabs cannot land on the same id.
+        for (const st of states.values()) {
+          reserveIds(maxSerializedLeafId(st.tabs));
         }
 
         const restored: Tab[] = [];
@@ -126,6 +138,7 @@ export function useSpacesBoot({
     launchCwd,
     home,
     allocId,
+    reserveIds,
     replaceTabs,
     markBooted,
     setActiveSpaceForNewTabs,

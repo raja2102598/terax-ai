@@ -12,7 +12,7 @@ import type {
 } from "@/modules/tabs/lib/useTabs";
 
 export type SerializedNode =
-  | { kind: "leaf"; cwd?: string; active?: boolean }
+  | { kind: "leaf"; id?: number; cwd?: string; active?: boolean }
   | { kind: "split"; dir: SplitDir; children: SerializedNode[] };
 
 export type SerializedTab =
@@ -43,6 +43,9 @@ function serializeNode(node: PaneNode, activeLeafId: number): SerializedNode {
   if (isLeaf(node)) {
     return {
       kind: "leaf",
+      // Persisted so the pane reclaims its own terminal snapshot on restore;
+      // snapshots in IndexedDB are keyed by nothing but this id.
+      id: node.id,
       ...(node.cwd !== undefined && { cwd: node.cwd }),
       ...(node.id === activeLeafId && { active: true }),
     };
@@ -97,6 +100,28 @@ export function serializeTabs(tabs: Tab[]): SerializedTab[] {
   return out;
 }
 
+/**
+ * Highest leaf id held in persisted state. Boot seeds its id counter above this
+ * so freshly allocated ids can never collide with a restored pane -- a
+ * collision hands the new pane another pane's terminal snapshot.
+ */
+export function maxSerializedLeafId(tabs: SerializedTab[]): number {
+  if (!Array.isArray(tabs)) return 0;
+  let max = 0;
+  const walk = (node: SerializedNode): void => {
+    if (!node) return;
+    if (node.kind === "leaf") {
+      if (typeof node.id === "number" && node.id > max) max = node.id;
+      return;
+    }
+    if (Array.isArray(node.children)) for (const c of node.children) walk(c);
+  };
+  for (const tab of tabs) {
+    if (tab?.kind === "terminal") walk(tab.tree);
+  }
+  return max;
+}
+
 type HydratedTree = {
   tree: PaneNode;
   activeLeafId: number;
@@ -109,7 +134,7 @@ function hydrateNode(
   acc: { activeLeafId: number | null },
 ): PaneNode {
   if (node.kind === "leaf") {
-    const id = allocId();
+    const id = node.id ?? allocId();
     if (node.active && acc.activeLeafId === null) acc.activeLeafId = id;
     return {
       kind: "leaf",
