@@ -25,7 +25,7 @@ import {
   registerPromptTracker,
 } from "./osc-handlers";
 import { openPty, type PtySession } from "./pty-bridge";
-import { dropAlternateScreen, stripInputReportingModes } from "./snapshotModes";
+import { dropAlternateScreen, stripDeadProgramModes } from "./snapshotModes";
 import { deleteSnapshot, getSnapshot, putSnapshot } from "./snapshotStore";
 import "../block/block.css";
 import type { ScrollMarker } from "../TerminalFastScrollbar";
@@ -584,7 +584,7 @@ function ensureSession(
         // the prompt; replaying the alternate-screen switch would strand the
         // fresh shell inside a dead TUI's buffer.
         session.snapshot = snap.snapshot
-          ? stripInputReportingModes(dropAlternateScreen(snap.snapshot))
+          ? stripDeadProgramModes(dropAlternateScreen(snap.snapshot))
           : snap.snapshot;
         if (snap.cols > 0) session.cols = snap.cols;
         if (snap.rows > 0) session.rows = snap.rows;

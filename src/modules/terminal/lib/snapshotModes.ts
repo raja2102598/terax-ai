@@ -1,20 +1,23 @@
-// DEC private modes that describe how the *attached program* wants its input
-// delivered, rather than anything about the screen contents.
+// Terminal modes a snapshot carries that belong to the program that set them,
+// not to the screen contents.
 //
-// SerializeAddon faithfully re-emits whatever modes were live when a slot was
-// serialized, which is right for the visible buffer and wrong for these: a
-// restored snapshot is replayed into a brand-new pty running a plain shell that
-// never asked for any of them. Focus reporting (1004) is the one that bites --
-// xterm then sends ESC[I / ESC[O on every focus change and the shell, which has
-// no idea what those are, echoes them into the prompt as ^[[I / ^[[O.
+// SerializeAddon appends _serializeModes() *last*, after both buffers, so every
+// mode byte in a snapshot shapes what the next program prints rather than
+// describing anything already rendered. On a cold restore that next program is
+// a brand-new shell which asked for none of it.
 //
-// The same reasoning covers the rest: mouse tracking would spray escape
-// sequences on click, bracketed paste would wrap pastes the shell does not
-// expect, application cursor keys would break the arrow keys outright, and
-// application keypad would leave the numeric keypad emitting SS3 sequences.
-const INPUT_REPORTING_MODES = new Set([
+// Focus reporting (1004) is the one that bites: xterm then sends ESC[I / ESC[O
+// on every focus change and the shell, which has no idea what those are, echoes
+// them into the prompt as ^[[I / ^[[O. The rest follow the same logic -- mouse
+// tracking sprays escapes on click, bracketed paste wraps pastes the shell does
+// not expect, application cursor keys break the arrow keys, application keypad
+// leaves the numeric keypad emitting SS3, and the render modes below change how
+// the new shell's own output is laid out.
+const PRIVATE_MODE_SETS = new Set([
   1, // DECCKM - application cursor keys
+  6, // DECOM - origin mode
   9, // X10 mouse reporting
+  45, // reverse wraparound
   66, // DECNKM - application keypad
   1000, // VT200 mouse reporting
   1002, // button-event mouse tracking
@@ -25,27 +28,36 @@ const INPUT_REPORTING_MODES = new Set([
   1015, // urxvt mouse encoding
   1016, // SGR-pixel mouse encoding
   2004, // bracketed paste
+  2026, // synchronized output
 ]);
 
-// CSI ? Pm [;Pm ...] h  -- a DEC private mode *set*. Resets (`l`) are left
-// alone; they already move toward the default we want.
+// CSI ? Pm [;Pm ...] h -- DEC private mode set.
 const DEC_PRIVATE_SET = /\x1b\[\?([\d;]*)h/g;
 
+// The only two non-private-set sequences _serializeModes emits. CSI 4 h is
+// insert mode; CSI ? 7 l turns wraparound *off*, which is the non-default
+// direction, so unlike other resets it has to go too or long commands stop
+// wrapping in the restored pane.
+const INSERT_MODE_SET = /\x1b\[4h/g;
+const WRAPAROUND_OFF = /\x1b\[\?7l/g;
+
 /**
- * Remove input-reporting mode sets from a serialized terminal snapshot, so
- * replaying it cannot enable reporting behind the back of the fresh shell that
- * is about to own the pty. Rendering modes and all ordinary content, including
- * SGR styling, are preserved untouched.
+ * Remove modes left behind by a program that is no longer attached, so
+ * replaying a snapshot cannot reconfigure the fresh shell that inherits the
+ * pty. Buffer contents and SGR styling are untouched.
  */
-export function stripInputReportingModes(snapshot: string): string {
-  return snapshot.replace(DEC_PRIVATE_SET, (match, params: string) => {
-    const requested = params.split(";");
-    const kept = requested.filter(
-      (p) => p !== "" && !INPUT_REPORTING_MODES.has(Number(p)),
-    );
-    if (kept.length === requested.length) return match;
-    return kept.length > 0 ? `\x1b[?${kept.join(";")}h` : "";
-  });
+export function stripDeadProgramModes(snapshot: string): string {
+  return snapshot
+    .replace(DEC_PRIVATE_SET, (match, params: string) => {
+      const requested = params.split(";");
+      const kept = requested.filter(
+        (p) => p !== "" && !PRIVATE_MODE_SETS.has(Number(p)),
+      );
+      if (kept.length === requested.length) return match;
+      return kept.length > 0 ? `\x1b[?${kept.join(";")}h` : "";
+    })
+    .replace(INSERT_MODE_SET, "")
+    .replace(WRAPAROUND_OFF, "");
 }
 
 // SerializeAddon serializes the normal buffer first, then -- when the session

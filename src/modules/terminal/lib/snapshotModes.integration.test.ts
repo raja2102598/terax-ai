@@ -2,7 +2,7 @@ import { SerializeAddon } from "@xterm/addon-serialize";
 import { Terminal } from "@xterm/xterm";
 import { describe, expect, it } from "vitest";
 
-import { stripInputReportingModes } from "./snapshotModes";
+import { stripDeadProgramModes } from "./snapshotModes";
 
 const ESC = "\x1b";
 
@@ -62,13 +62,13 @@ describe("restoring a snapshot into a fresh pty", () => {
   });
 
   it("leaves focus reporting off when the snapshot is stripped first", async () => {
-    const snapshot = stripInputReportingModes(await serializeTuiSession());
+    const snapshot = stripDeadProgramModes(await serializeTuiSession());
     const term = await rebindWithSnapshot(snapshot);
     expect(await focusReportingState(term)).toBe("reset");
   });
 
   it("still restores the visible buffer after stripping", async () => {
-    const snapshot = stripInputReportingModes(await serializeTuiSession());
+    const snapshot = stripDeadProgramModes(await serializeTuiSession());
     const term = await rebindWithSnapshot(snapshot);
     const line = term.buffer.active.getLine(0)?.translateToString(true);
     expect(line).toContain("claude session output");
@@ -80,6 +80,6 @@ describe("restoring a snapshot into a fresh pty", () => {
     term.loadAddon(serializer);
     await write(term, "raja@host:~$ ls\r\nfoo bar\r\n");
     const snapshot = serializer.serialize({ scrollback: 100 });
-    expect(stripInputReportingModes(snapshot)).toBe(snapshot);
+    expect(stripDeadProgramModes(snapshot)).toBe(snapshot);
   });
 });

@@ -222,6 +222,20 @@ describe("hydrateTabs", () => {
     expect(new Set(ids).size).toBe(2);
   });
 
+  it("allocates a fresh id for malformed persisted ids", () => {
+    // Disk state can hold a string, a negative, or a fraction; any of those
+    // reaching openPty as a paneId leaves the pane unable to spawn.
+    const bad = ["7", -1, 1.5, 0, null, Number.NaN];
+    for (const id of bad) {
+      const serialized = [
+        { kind: "terminal", tree: { kind: "leaf", id } },
+      ] as unknown as SerializedTab[];
+      const [restored] = hydrateTabs(serialized, "s1", counter(100));
+      if (restored.kind !== "terminal") throw new Error("expected terminal");
+      expect(leafIdsOf(restored.paneTree)).toEqual([100]);
+    }
+  });
+
   it("returns empty for corrupted input without throwing", () => {
     expect(hydrateTabs([] as SerializedTab[], "s1", counter())).toEqual([]);
     expect(

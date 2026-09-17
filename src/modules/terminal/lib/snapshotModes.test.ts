@@ -1,61 +1,86 @@
 import { describe, expect, it } from "vitest";
 
-import { dropAlternateScreen, stripInputReportingModes } from "./snapshotModes";
+import { dropAlternateScreen, stripDeadProgramModes } from "./snapshotModes";
 
 const ESC = "\x1b";
 
-describe("stripInputReportingModes", () => {
+describe("stripDeadProgramModes", () => {
   it("drops focus reporting, the mode that leaks ^[[I / ^[[O into a fresh shell", () => {
     const snapshot = `${ESC}[?1004hhello`;
-    expect(stripInputReportingModes(snapshot)).toBe("hello");
+    expect(stripDeadProgramModes(snapshot)).toBe("hello");
   });
 
   it("drops mouse tracking and its encoding modes", () => {
     const snapshot = `${ESC}[?1000h${ESC}[?1002h${ESC}[?1003h${ESC}[?1006h${ESC}[?9h`;
-    expect(stripInputReportingModes(snapshot)).toBe("");
+    expect(stripDeadProgramModes(snapshot)).toBe("");
   });
 
   it("drops bracketed paste and application cursor keys", () => {
     const snapshot = `${ESC}[?2004h${ESC}[?1h`;
-    expect(stripInputReportingModes(snapshot)).toBe("");
+    expect(stripDeadProgramModes(snapshot)).toBe("");
   });
 
   it("drops application keypad, which SerializeAddon emits as [?66h", () => {
-    expect(stripInputReportingModes(`${ESC}[?66h`)).toBe("");
+    expect(stripDeadProgramModes(`${ESC}[?66h`)).toBe("");
   });
 
-  it("keeps rendering modes that legitimately describe the restored buffer", () => {
-    const snapshot = `${ESC}[?6h${ESC}[?45h${ESC}[?7l${ESC}[4h`;
-    expect(stripInputReportingModes(snapshot)).toBe(snapshot);
+  it("drops the render modes too: they are appended after the buffer, so they only affect the new shell", () => {
+    // SerializeAddon appends _serializeModes() last, after both buffers, so
+    // every mode in a snapshot shapes what the *fresh* shell prints, not the
+    // restored contents. Origin, insert and reverse-wraparound all belong to
+    // the dead program.
+    expect(stripDeadProgramModes(`${ESC}[?6h${ESC}[?45h${ESC}[4h`)).toBe("");
+  });
+
+  it("drops [?7l, which turns wraparound off and would stop long commands wrapping", () => {
+    expect(stripDeadProgramModes(`${ESC}[?7l`)).toBe("");
+  });
+
+  it("covers every sequence _serializeModes can emit", () => {
+    const emitted = [
+      "[?1h",
+      "[?66h",
+      "[?2004h",
+      "[4h",
+      "[?6h",
+      "[?45h",
+      "[?1004h",
+      "[?7l",
+      "[?9h",
+      "[?1000h",
+      "[?1002h",
+      "[?1003h",
+    ]
+      .map((m) => ESC + m)
+      .join("");
+    expect(stripDeadProgramModes(emitted)).toBe("");
   });
 
   it("keeps mode resets, which are already the safe direction", () => {
     const snapshot = `${ESC}[?1004l${ESC}[?1000l`;
-    expect(stripInputReportingModes(snapshot)).toBe(snapshot);
+    expect(stripDeadProgramModes(snapshot)).toBe(snapshot);
   });
 
   it("strips only the offending params from a combined set", () => {
-    expect(stripInputReportingModes(`${ESC}[?1000;1006;45h`)).toBe(
-      `${ESC}[?45h`,
-    );
+    // 25 (cursor visibility) is not one of the modes _serializeModes emits,
+    // so it must survive alongside the mouse modes being removed.
+    expect(stripDeadProgramModes(`${ESC}[?1000;1006;25h`)).toBe(`${ESC}[?25h`);
   });
 
   it("does not confuse a mode whose digits prefix another", () => {
     // 100 is not in the strip set even though 1000 and 1004 are.
-    expect(stripInputReportingModes(`${ESC}[?100h`)).toBe(`${ESC}[?100h`);
+    expect(stripDeadProgramModes(`${ESC}[?100h`)).toBe(`${ESC}[?100h`);
   });
 
   it("preserves ordinary terminal content and SGR styling", () => {
     const snapshot = `${ESC}[1;32mraja@host${ESC}[0m:~$ ${ESC}[?1004h`;
-    expect(stripInputReportingModes(snapshot)).toBe(
+    expect(stripDeadProgramModes(snapshot)).toBe(
       `${ESC}[1;32mraja@host${ESC}[0m:~$ `,
     );
   });
 
   it("leaves a snapshot with no private modes untouched", () => {
-    expect(stripInputReportingModes("plain output\r\n")).toBe(
-      "plain output\r\n",
-    );
+    expect(stripDeadProgramModes("plain output\r\n")).toBe("plain output\r\n");
   });
 });
 
@@ -79,7 +104,7 @@ describe("dropAlternateScreen", () => {
 
   it("composes with the mode strip without reintroducing either", () => {
     const snapshot = `out${ESC}[?1004h${ESC}[?1049h${ESC}[Htui`;
-    const clean = stripInputReportingModes(dropAlternateScreen(snapshot));
+    const clean = stripDeadProgramModes(dropAlternateScreen(snapshot));
     expect(clean).toBe("out");
   });
 });

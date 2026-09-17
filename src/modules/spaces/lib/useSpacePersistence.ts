@@ -7,7 +7,11 @@ import {
   forEachSlot,
   serializeSlot,
 } from "@/modules/terminal/lib/rendererPool";
-import { putSnapshot } from "@/modules/terminal/lib/snapshotStore";
+import {
+  deleteSnapshot,
+  putSnapshot,
+} from "@/modules/terminal/lib/snapshotStore";
+import { leafIds } from "@/modules/terminal/lib/panes";
 
 const DEBOUNCE_MS = 3000;
 
@@ -27,6 +31,12 @@ export function useSpacePersistence({
   enabled,
 }: Params) {
   const last = useRef<Map<string, LastWrite>>(new Map());
+  /**
+   * Spaces observed holding at least one tab. A space only needs clearing once
+   * it has actually held something; keying off `last.json` instead would miss
+   * a space emptied before its first flush, since boot seeds those with "".
+   */
+  const everHadTabs = useRef<Set<string>>(new Set());
   const seeded = useRef(false);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const latest = useRef<Snapshot>({ tabs, activeId, activeSpaceId });
@@ -42,14 +52,31 @@ export function useSpacePersistence({
     )) {
       last.current.set(id, { json: "", activeTabIndex: idx });
     }
+    // Restored tabs are already in hand here, so a space emptied inside the
+    // first debounce window is still known to have held something.
+    for (const t of tabs) everHadTabs.current.add(t.spaceId);
   }
 
   const flush = useCallback((snap: Snapshot) => {
+    // A private terminal is excluded from saved tabs, so its buffer must not be
+    // written either -- persisting it both leaks the contents to disk and
+    // strands a snapshot under a leaf id no saved tab claims, which a later
+    // pane can then allocate and display.
+    const privateLeaves = new Set<number>();
+    for (const t of snap.tabs) {
+      if (t.kind === "terminal" && t.private) {
+        for (const id of leafIds(t.paneTree)) privateLeaves.add(id);
+      }
+    }
+
     forEachSlot((slot) => {
       const leafId = slot.currentLeafId ?? slot.retainedLeafId;
-      if (leafId !== null) {
-        void putSnapshot(leafId, serializeSlot(slot));
+      if (leafId === null) return;
+      if (privateLeaves.has(leafId)) {
+        void deleteSnapshot(leafId);
+        return;
       }
+      void putSnapshot(leafId, serializeSlot(slot));
     });
 
     const groups = new Map<string, Tab[]>();
@@ -59,15 +86,15 @@ export function useSpacePersistence({
       else groups.set(t.spaceId, [t]);
     }
 
+    for (const spaceId of groups.keys()) everHadTabs.current.add(spaceId);
+
     // A space whose last tab was moved out produces no group here, so its old
     // state would stay on disk claiming leaf ids the destination space now
     // claims too -- and leaf ids key sessions and renderer slots. Re-save it as
-    // empty. Restricted to spaces we have already written a non-empty state for
-    // in this session, so a space the user never opened is never cleared.
-    for (const [spaceId, prev] of last.current) {
-      if (groups.has(spaceId)) continue;
-      if (!prev.json || prev.json === "[]") continue;
-      groups.set(spaceId, []);
+    // empty. Only spaces seen holding tabs are cleared, so one the user never
+    // opened is left alone.
+    for (const spaceId of everHadTabs.current) {
+      if (!groups.has(spaceId)) groups.set(spaceId, []);
     }
 
     for (const [spaceId, group] of groups) {

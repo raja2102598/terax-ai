@@ -171,8 +171,15 @@ function claimId(
   allocId: () => number,
   claimed: Set<number>,
 ): number {
-  let id =
-    persisted !== undefined && !claimed.has(persisted) ? persisted : allocId();
+  // Only a positive safe integer is usable: the id reaches openPty as a paneId
+  // whose Rust command expects Option<u32>, and a string id would additionally
+  // stay distinct in this claim set while colliding with numeric ids in DOM
+  // attributes. Anything else on disk is treated as absent.
+  const usable =
+    typeof persisted === "number" &&
+    Number.isSafeInteger(persisted) &&
+    persisted > 0;
+  let id = usable && !claimed.has(persisted) ? persisted : allocId();
   while (claimed.has(id)) id = allocId();
   claimed.add(id);
   return id;
