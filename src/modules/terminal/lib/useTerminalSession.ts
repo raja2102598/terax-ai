@@ -25,6 +25,7 @@ import {
   registerPromptTracker,
 } from "./osc-handlers";
 import { openPty, type PtySession } from "./pty-bridge";
+import { sanitizeDiskSnapshot } from "./snapshotModes";
 import { deleteSnapshot, getSnapshot, putSnapshot } from "./snapshotStore";
 import "../block/block.css";
 import type { ScrollMarker } from "../TerminalFastScrollbar";
@@ -522,6 +523,11 @@ configureRendererPool({
     if (out.cols > 0) s.cols = out.cols;
     if (out.rows > 0) s.rows = out.rows;
     s.altScreenAtRelease = out.altScreen;
+    // Kept in memory above so the pane can be rebound within this session, but
+    // never written: this runs whenever the pool steals or reaps a slot, which
+    // is the path that put private buffers on disk behind the persistence
+    // layer's back.
+    if (privateLeaves.has(leafId)) return;
     void putSnapshot(leafId, out);
   },
 });
@@ -577,10 +583,20 @@ function ensureSession(
     if (!session.snapshot) {
       const snap = await getSnapshot(leafId);
       if (snap && !session.disposed) {
-        session.snapshot = snap.snapshot;
+        // A persisted snapshot always outlives its pty, so everything it
+        // captured belongs to a program that is already gone. Replaying the
+        // modes is what left focus reporting on and echoed ^[[I / ^[[O into
+        // the prompt; replaying the alternate-screen switch would strand the
+        // fresh shell inside a dead TUI's buffer.
+        session.snapshot = snap.snapshot
+          ? sanitizeDiskSnapshot(snap.snapshot)
+          : snap.snapshot;
         if (snap.cols > 0) session.cols = snap.cols;
         if (snap.rows > 0) session.rows = snap.rows;
-        session.altScreenAtRelease = snap.altScreen;
+        // Never propagated from disk: the flag makes bindSlot skip ring replay
+        // and kick a SIGWINCH to make a live TUI repaint, but nothing is live
+        // here and the alternate section has just been dropped.
+        session.altScreenAtRelease = false;
       }
     }
   })();
@@ -916,7 +932,60 @@ export async function leafHasForegroundProcess(
   }
 }
 
-export function disposeSession(leafId: number): void {
+/**
+ * Leaves belonging to private terminals. Their buffers must never reach disk:
+ * a private tab is excluded from saved state, so a persisted snapshot both
+ * leaks its contents and strands a buffer under an id no saved tab claims,
+ * which a later pane can allocate and display.
+ */
+const privateLeaves = new Set<number>();
+
+/**
+ * Replace the set of leaves whose buffers must stay off disk.
+ *
+ * `deleteStored` clears anything already written for a newly private leaf, and
+ * must stay false until boot has reserved the persisted ids: before that, a
+ * private tab opened during startup can hold an id a restored pane still owns a
+ * snapshot under, and deleting it destroys that pane's buffer for good --
+ * boot's keepSnapshot disposal cannot bring it back.
+ */
+export function setPrivateLeaves(
+  ids: Iterable<number>,
+  deleteStored: boolean,
+): void {
+  const next = new Set(ids);
+  if (deleteStored) {
+    for (const id of next) {
+      if (!privateLeaves.has(id)) void deleteSnapshot(id);
+    }
+  }
+  privateLeaves.clear();
+  for (const id of next) privateLeaves.add(id);
+}
+
+/** Leaves with a live session right now. */
+export function liveSessionLeafIds(): number[] {
+  return [...sessions.keys()];
+}
+
+export type DisposeOptions = {
+  /**
+   * Leave the persisted snapshot in place. Only for tearing down a transient
+   * leaf whose id a restored pane is about to claim: that snapshot belongs to
+   * the pane being restored, not to the session being closed.
+   */
+  keepSnapshot?: boolean;
+};
+
+export function disposeSession(
+  leafId: number,
+  opts: DisposeOptions = {},
+): void {
+  // Deleted before the early return below: a restored pane stays cold until it
+  // is first opened, so closing one that was never activated has no session
+  // here, and returning first would strand its snapshot in IndexedDB where a
+  // later pane on the same leaf id would restore a closed pane's buffer.
+  if (!opts.keepSnapshot) void deleteSnapshot(leafId);
   const s = sessions.get(leafId);
   if (!s) return;
   s.disposed = true;
@@ -940,7 +1009,6 @@ export function disposeSession(leafId: number): void {
       w.resolve();
     }
   }
-  void deleteSnapshot(leafId);
 }
 
 type Options = {

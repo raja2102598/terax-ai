@@ -12,7 +12,7 @@ import type {
 } from "@/modules/tabs/lib/useTabs";
 
 export type SerializedNode =
-  | { kind: "leaf"; cwd?: string; active?: boolean }
+  | { kind: "leaf"; id?: number; cwd?: string; active?: boolean }
   | { kind: "split"; dir: SplitDir; children: SerializedNode[] };
 
 export type SerializedTab =
@@ -43,6 +43,9 @@ function serializeNode(node: PaneNode, activeLeafId: number): SerializedNode {
   if (isLeaf(node)) {
     return {
       kind: "leaf",
+      // Persisted so the pane reclaims its own terminal snapshot on restore;
+      // snapshots in IndexedDB are keyed by nothing but this id.
+      id: node.id,
       ...(node.cwd !== undefined && { cwd: node.cwd }),
       ...(node.id === activeLeafId && { active: true }),
     };
@@ -97,6 +100,47 @@ export function serializeTabs(tabs: Tab[]): SerializedTab[] {
   return out;
 }
 
+/**
+ * Highest leaf id held in persisted state. Boot seeds its id counter above this
+ * so freshly allocated ids can never collide with a restored pane -- a
+ * collision hands the new pane another pane's terminal snapshot.
+ */
+/** pty_open deserializes pane_id as Option<u32> (src-tauri/src/modules/pty/mod.rs). */
+const MAX_LEAF_ID = 0xff_ff_ff_ff;
+
+/**
+ * Only a positive integer within the backend's u32 range is usable as a leaf
+ * id. Anything larger survives hydration but fails every pty spawn, and worse,
+ * seeds the shared allocator above the range so every terminal created
+ * afterwards fails too; past 2^53 the allocator stops advancing entirely and
+ * hands out one id forever.
+ */
+function isUsableLeafId(value: unknown): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    value > 0 &&
+    value <= MAX_LEAF_ID
+  );
+}
+
+export function maxSerializedLeafId(tabs: SerializedTab[]): number {
+  if (!Array.isArray(tabs)) return 0;
+  let max = 0;
+  const walk = (node: SerializedNode): void => {
+    if (!node) return;
+    if (node.kind === "leaf") {
+      if (isUsableLeafId(node.id) && node.id > max) max = node.id;
+      return;
+    }
+    if (Array.isArray(node.children)) for (const c of node.children) walk(c);
+  };
+  for (const tab of tabs) {
+    if (tab?.kind === "terminal") walk(tab.tree);
+  }
+  return max;
+}
+
 type HydratedTree = {
   tree: PaneNode;
   activeLeafId: number;
@@ -107,9 +151,10 @@ function hydrateNode(
   node: SerializedNode,
   allocId: () => number,
   acc: { activeLeafId: number | null },
+  claimed: Set<number>,
 ): PaneNode {
   if (node.kind === "leaf") {
-    const id = allocId();
+    const id = claimId(node.id, allocId, claimed);
     if (node.active && acc.activeLeafId === null) acc.activeLeafId = id;
     return {
       kind: "leaf",
@@ -117,18 +162,51 @@ function hydrateNode(
       ...(node.cwd !== undefined && { cwd: node.cwd }),
     };
   }
-  const children = node.children.map((c) => hydrateNode(c, allocId, acc));
-  if (children.length === 0) return { kind: "leaf", id: allocId() };
+  const children = node.children.map((c) =>
+    hydrateNode(c, allocId, acc, claimed),
+  );
+  if (children.length === 0)
+    return { kind: "leaf", id: claimId(undefined, allocId, claimed) };
   if (children.length === 1) return children[0];
-  return { kind: "split", id: allocId(), dir: node.dir, children };
+  return {
+    kind: "split",
+    id: claimId(undefined, allocId, claimed),
+    dir: node.dir,
+    children,
+  };
+}
+
+/**
+ * Take the persisted id when it is still free, otherwise mint a fresh one.
+ *
+ * Ids must be unique across the whole boot, not just within one tree: a space
+ * emptied by moving its last tab out is never re-saved, so its stale state
+ * still claims a leaf the destination space now also claims. Sessions and
+ * renderer slots are keyed solely by leaf id, so a duplicate would put two
+ * panes on one pty.
+ */
+function claimId(
+  persisted: number | undefined,
+  allocId: () => number,
+  claimed: Set<number>,
+): number {
+  // A string id would additionally stay distinct in this claim set while
+  // colliding with numeric ids in DOM attributes. Anything unusable on disk is
+  // treated as absent.
+  const usable = isUsableLeafId(persisted);
+  let id = usable && !claimed.has(persisted) ? persisted : allocId();
+  while (claimed.has(id)) id = allocId();
+  claimed.add(id);
+  return id;
 }
 
 function hydrateTree(
   tree: SerializedNode,
   allocId: () => number,
+  claimed: Set<number>,
 ): HydratedTree {
   const acc: { activeLeafId: number | null } = { activeLeafId: null };
-  const paneTree = hydrateNode(tree, allocId, acc);
+  const paneTree = hydrateNode(tree, allocId, acc, claimed);
   const leaves = collectLeaves(paneTree);
   const activeLeafId = acc.activeLeafId ?? leaves[0]?.id ?? allocId();
   const firstLeafCwd =
@@ -145,10 +223,15 @@ function hydrateTab(
   s: SerializedTab,
   spaceId: string,
   allocId: () => number,
+  claimed: Set<number>,
 ): Tab | null {
   switch (s.kind) {
     case "terminal": {
-      const { tree, activeLeafId, firstLeafCwd } = hydrateTree(s.tree, allocId);
+      const { tree, activeLeafId, firstLeafCwd } = hydrateTree(
+        s.tree,
+        allocId,
+        claimed,
+      );
       const title =
         s.customTitle ??
         (firstLeafCwd ? basename(firstLeafCwd) : s.blocks ? "blocks" : "shell");
@@ -221,12 +304,14 @@ export function hydrateTabs(
   serialized: SerializedTab[],
   spaceId: string,
   allocId: () => number,
+  /** Ids already taken. Share one set across spaces so restores cannot collide. */
+  claimed: Set<number> = new Set(),
 ): Tab[] {
   if (!Array.isArray(serialized)) return [];
   const out: Tab[] = [];
   for (const s of serialized) {
     try {
-      const tab = hydrateTab(s, spaceId, allocId);
+      const tab = hydrateTab(s, spaceId, allocId, claimed);
       if (tab) out.push(tab);
     } catch {
       // Skip corrupted entries rather than failing the whole restore.
