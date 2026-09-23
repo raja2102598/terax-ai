@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { PaneNode } from "@/modules/terminal/lib/panes";
 import type { Tab } from "@/modules/tabs/lib/useTabs";
-import { hydrateTabs, serializeTabs, type SerializedTab } from "./serialize";
+import {
+  hydrateTabs,
+  maxSerializedLeafId,
+  serializeTabs,
+  type SerializedTab,
+} from "./serialize";
 
 function counter(start = 100): () => number {
   let n = start;
@@ -111,7 +116,41 @@ describe("hydrateTabs", () => {
     expect(restored.cwd).toBe("/b");
   });
 
-  it("allocates fresh, unique, monotonic ids across all tabs and leaves", () => {
+  it("keeps leaf ids stable across a save/restore round trip", () => {
+    // Terminal snapshots are persisted keyed by leaf id, so a restored pane
+    // must come back under the same id or it adopts another pane's buffer.
+    const tree: PaneNode = {
+      kind: "split",
+      id: 10,
+      dir: "row",
+      children: [
+        { kind: "leaf", id: 11, cwd: "/a" },
+        { kind: "leaf", id: 12, cwd: "/b" },
+      ],
+    };
+    const serialized = serializeTabs([
+      term({ id: 1, paneTree: tree, activeLeafId: 11 }),
+    ]);
+    const [restored] = hydrateTabs(serialized, "s1", counter(100));
+    if (restored.kind !== "terminal") throw new Error("expected terminal tab");
+
+    expect(leafIdsOf(restored.paneTree)).toEqual([11, 12]);
+    expect(restored.activeLeafId).toBe(11);
+  });
+
+  it("allocates fresh ids for leaves saved before ids were persisted", () => {
+    // Legacy state on disk has no `id` on its leaves; those must still hydrate.
+    const serialized: SerializedTab[] = [
+      { kind: "terminal", tree: { kind: "leaf", cwd: "/a", active: true } },
+    ];
+    const [restored] = hydrateTabs(serialized, "s1", counter(100));
+    if (restored.kind !== "terminal") throw new Error("expected terminal tab");
+
+    expect(leafIdsOf(restored.paneTree)).toEqual([100]);
+    expect(restored.activeLeafId).toBe(100);
+  });
+
+  it("allocates fresh, unique, monotonic ids for everything not persisted", () => {
     const tree: PaneNode = {
       kind: "split",
       id: 10,
@@ -133,7 +172,68 @@ describe("hydrateTabs", () => {
       if (t.kind === "terminal") ids.push(...leafIdsOf(t.paneTree));
     }
     expect(new Set(ids).size).toBe(ids.length);
-    expect(Math.min(...ids)).toBeGreaterThanOrEqual(100);
+    // Tab ids and split ids are never persisted, so they are always fresh.
+    const tabIds = restored.map((t) => t.id);
+    expect(Math.min(...tabIds)).toBeGreaterThanOrEqual(100);
+  });
+
+  it("never hands two leaves the same id, even when disk state repeats one", () => {
+    // A space emptied by moving its last tab out is never re-saved, so its
+    // stale state keeps a leaf the target space now also claims. Sessions and
+    // renderer slots are keyed solely by leaf id, so a duplicate would make two
+    // panes share one pty.
+    const claimed = new Set<number>();
+    const alloc = counter(100);
+    const stale: SerializedTab[] = [
+      { kind: "terminal", tree: { kind: "leaf", id: 7, cwd: "/a" } },
+    ];
+    const moved: SerializedTab[] = [
+      { kind: "terminal", tree: { kind: "leaf", id: 7, cwd: "/a" } },
+    ];
+
+    const a = hydrateTabs(stale, "s1", alloc, claimed);
+    const b = hydrateTabs(moved, "s2", alloc, claimed);
+    const ids = [...a, ...b].flatMap((t) =>
+      t.kind === "terminal" ? leafIdsOf(t.paneTree) : [],
+    );
+
+    expect(ids).toHaveLength(2);
+    expect(new Set(ids).size).toBe(2);
+    expect(ids).toContain(7);
+  });
+
+  it("deduplicates a repeated id inside a single tree", () => {
+    const serialized: SerializedTab[] = [
+      {
+        kind: "terminal",
+        tree: {
+          kind: "split",
+          dir: "row",
+          children: [
+            { kind: "leaf", id: 5 },
+            { kind: "leaf", id: 5 },
+          ],
+        },
+      },
+    ];
+    const [restored] = hydrateTabs(serialized, "s1", counter(100));
+    if (restored.kind !== "terminal") throw new Error("expected terminal tab");
+    const ids = leafIdsOf(restored.paneTree);
+    expect(new Set(ids).size).toBe(2);
+  });
+
+  it("allocates a fresh id for malformed persisted ids", () => {
+    // Disk state can hold a string, a negative, or a fraction; any of those
+    // reaching openPty as a paneId leaves the pane unable to spawn.
+    const bad = ["7", -1, 1.5, 0, null, Number.NaN, 4294967296, 1e100];
+    for (const id of bad) {
+      const serialized = [
+        { kind: "terminal", tree: { kind: "leaf", id } },
+      ] as unknown as SerializedTab[];
+      const [restored] = hydrateTabs(serialized, "s1", counter(100));
+      if (restored.kind !== "terminal") throw new Error("expected terminal");
+      expect(leafIdsOf(restored.paneTree)).toEqual([100]);
+    }
   });
 
   it("returns empty for corrupted input without throwing", () => {
@@ -156,5 +256,69 @@ describe("hydrateTabs", () => {
       "localhost:5173",
       "README.md",
     ]);
+  });
+});
+
+describe("maxSerializedLeafId", () => {
+  it("finds the highest persisted leaf id across tabs and splits", () => {
+    const serialized: SerializedTab[] = [
+      { kind: "terminal", tree: { kind: "leaf", id: 4 } },
+      {
+        kind: "terminal",
+        tree: {
+          kind: "split",
+          dir: "row",
+          children: [
+            { kind: "leaf", id: 9 },
+            { kind: "leaf", id: 31 },
+          ],
+        },
+      },
+    ];
+    expect(maxSerializedLeafId(serialized)).toBe(31);
+  });
+
+  it("returns 0 for legacy leaves that carry no id", () => {
+    expect(
+      maxSerializedLeafId([{ kind: "terminal", tree: { kind: "leaf" } }]),
+    ).toBe(0);
+  });
+
+  it("ignores non-terminal tabs", () => {
+    expect(maxSerializedLeafId([{ kind: "editor", path: "/a.ts" }])).toBe(0);
+  });
+
+  it("ignores ids too large to be safe integers", () => {
+    // 1e100 would push the shared allocator somewhere `++` cannot advance,
+    // handing every later tab the same id.
+    const serialized = [
+      { kind: "terminal", tree: { kind: "leaf", id: 1e100 } },
+      { kind: "terminal", tree: { kind: "leaf", id: 12 } },
+    ] as unknown as SerializedTab[];
+    expect(maxSerializedLeafId(serialized)).toBe(12);
+  });
+
+  it("ignores ids beyond the backend's u32 pane_id range", () => {
+    // pty_open takes Option<u32>; anything larger hydrates fine and then fails
+    // every spawn, while also seeding the allocator above the usable range.
+    const serialized = [
+      { kind: "terminal", tree: { kind: "leaf", id: 4294967296 } },
+      { kind: "terminal", tree: { kind: "leaf", id: 4294967295 } },
+    ] as unknown as SerializedTab[];
+    expect(maxSerializedLeafId(serialized)).toBe(4294967295);
+  });
+
+  it("ignores negative, fractional and string ids", () => {
+    const serialized = [
+      { kind: "terminal", tree: { kind: "leaf", id: -5 } },
+      { kind: "terminal", tree: { kind: "leaf", id: 1.5 } },
+      { kind: "terminal", tree: { kind: "leaf", id: "9" } },
+    ] as unknown as SerializedTab[];
+    expect(maxSerializedLeafId(serialized)).toBe(0);
+  });
+
+  it("returns 0 for corrupted input without throwing", () => {
+    expect(maxSerializedLeafId([])).toBe(0);
+    expect(maxSerializedLeafId(null as unknown as SerializedTab[])).toBe(0);
   });
 });

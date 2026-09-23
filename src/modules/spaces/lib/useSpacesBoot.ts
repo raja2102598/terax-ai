@@ -3,10 +3,18 @@ import { usePreferencesStore } from "@/modules/settings/preferences";
 import type { Tab } from "@/modules/tabs";
 import { DEFAULT_SPACE_ID } from "@/modules/tabs/lib/useTabs";
 import { isLeaf, type PaneNode } from "@/modules/terminal/lib/panes";
+import {
+  disposeSession,
+  liveSessionLeafIds,
+} from "@/modules/terminal/lib/useTerminalSession";
 import { parseWorkspaceScopeKey, type WorkspaceEnv } from "@/modules/workspace";
 import { useEffect, useRef } from "react";
 import { activeSpaceEnv, freshTabCwd } from "./activeSpace";
-import { freshTerminalTab, hydrateTabs } from "./serialize";
+import {
+  freshTerminalTab,
+  hydrateTabs,
+  maxSerializedLeafId,
+} from "./serialize";
 import { loadAll, type SpaceMeta, saveActiveId, saveSpacesList } from "./store";
 import { useSpaces } from "./useSpaces";
 
@@ -15,6 +23,7 @@ type Params = {
   launchCwd: string | null;
   home: string | null;
   allocId: () => number;
+  reserveIds: (throughId: number) => void;
   replaceTabs: (tabs: Tab[], activeId: number) => void;
   markBooted: () => void;
   setActiveSpaceForNewTabs: (id: string) => void;
@@ -39,6 +48,7 @@ export function useSpacesBoot({
   launchCwd,
   home,
   allocId,
+  reserveIds,
   replaceTabs,
   markBooted,
   setActiveSpaceForNewTabs,
@@ -78,11 +88,36 @@ export function useSpacesBoot({
           return;
         }
 
+        // Claim every persisted leaf id before allocating anything, so restored
+        // panes and freshly minted tabs cannot land on the same id.
+        for (const st of states.values()) {
+          reserveIds(maxSerializedLeafId(st.tabs));
+        }
+
+        // Everything opened before boot finished is about to be dropped by
+        // replaceTabs, so its pty is orphaned either way. Dispose it now:
+        // otherwise a tab opened during startup keeps a live session on a leaf
+        // id that a restored pane is about to claim, and the restored pane
+        // would adopt that running pty instead of loading its own snapshot.
+        // keepSnapshot: these leaf ids may be the very ids restored panes are
+        // about to claim, and the snapshots stored under them belong to those
+        // panes. A pre-boot tab never persists a snapshot of its own, because
+        // persistence stays gated until boot completes.
+        for (const leafId of liveSessionLeafIds()) {
+          disposeSession(leafId, { keepSnapshot: true });
+        }
+
+        // One claim set for every space: a space emptied by moving its last
+        // tab out is never re-saved, so two spaces on disk can still name the
+        // same leaf id, and sessions are keyed solely by that id.
+        const claimedLeafIds = new Set<number>();
         const restored: Tab[] = [];
         for (const space of spaces) {
           const st = states.get(space.id);
           if (!st) continue;
-          restored.push(...hydrateTabs(st.tabs, space.id, allocId));
+          restored.push(
+            ...hydrateTabs(st.tabs, space.id, allocId, claimedLeafIds),
+          );
         }
 
         const active =
@@ -126,6 +161,7 @@ export function useSpacesBoot({
     launchCwd,
     home,
     allocId,
+    reserveIds,
     replaceTabs,
     markBooted,
     setActiveSpaceForNewTabs,
