@@ -19,12 +19,10 @@ const AGENT_EVENT: &str = "terax:agent-signal";
 // immediately; while output keeps streaming, flushes are paced so each IPC
 // message carries a batch. Every message costs a webview eval (plus a fetch
 // above 1 KiB), so bulk output is paced to roughly one message per frame.
-// MAX_IDLE is only a safety net for missed signals.
 const FLUSH_QUIET: Duration = Duration::from_millis(12);
 const FLUSH_PACE_INTERACTIVE: Duration = Duration::from_millis(3);
 const FLUSH_PACE_BULK: Duration = Duration::from_millis(8);
 const FLUSH_BULK_BYTES: usize = 16 * 1024;
-const FLUSH_MAX_IDLE: Duration = Duration::from_millis(50);
 // Linux pty buffers hold up to 64 KiB, so a flood drains in one read.
 const READ_BUF: usize = 64 * 1024;
 // Cap on buffered-but-not-yet-flushed bytes. On overflow we discard the
@@ -253,8 +251,9 @@ pub fn spawn(
                         if done_f.load(Ordering::Acquire) {
                             return;
                         }
-                        let (next, _) = cv.wait_timeout(g, FLUSH_MAX_IDLE).unwrap();
-                        g = next;
+                        // No timeout: an idle terminal must cost zero wakeups.
+                        // `done` is only set under this lock, so it can't be missed.
+                        g = cv.wait(g).unwrap();
                     }
                 }
                 let delay = last_flush
@@ -313,7 +312,10 @@ pub fn spawn(
                     log::debug!("pty final-data send failed (channel closed): {e}");
                 }
             }
-            done_e.store(true, Ordering::Release);
+            {
+                let _g = lock.lock().unwrap();
+                done_e.store(true, Ordering::Release);
+            }
             cv.notify_all();
             if let Err(e) = on_exit.send(code) {
                 log::debug!("pty exit send failed (channel closed): {e}");

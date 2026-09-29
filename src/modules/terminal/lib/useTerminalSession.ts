@@ -48,6 +48,7 @@ import {
   getLiveSlotForLeaf,
   getSlotForLeaf,
   isLeafAltScreen,
+  onSlotBindingChange,
   parkLeafSlot,
   poolSize,
   poolSlotStats,
@@ -1270,11 +1271,11 @@ export function useTerminalSession({
         notify();
       };
       attach();
-      // Renderer slots can be parked and rebound. This low-frequency identity
-      // check only reconnects event listeners; scroll state itself is event-driven.
-      const watcher = setInterval(attach, 250);
+      // Renderer slots can be parked and rebound; reconnect on those events
+      // instead of polling so an idle pane schedules no timers.
+      const unsubscribe = onSlotBindingChange(attach);
       return () => {
-        clearInterval(watcher);
+        unsubscribe();
         for (const cleanup of cleanups) cleanup();
       };
     },

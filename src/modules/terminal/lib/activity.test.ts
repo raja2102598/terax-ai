@@ -53,4 +53,34 @@ describe("reduceTerminalActivity", () => {
 
     expect(result.state).toBe("unknown");
   });
+
+  it("keeps snapshot identity when a poll observes nothing new", () => {
+    const running = reduceTerminalActivity(idle, {
+      type: "process-observed",
+      process: "node",
+      pid: 42,
+      ports: [3000, 5173],
+    });
+    const same = reduceTerminalActivity(running, {
+      type: "process-observed",
+      process: "node",
+      pid: 42,
+      ports: [3000, 5173],
+    });
+    expect(same).toBe(running);
+    expect(
+      reduceTerminalActivity(running, {
+        type: "ports-changed",
+        ports: [3000, 5173],
+      }),
+    ).toBe(running);
+    expect(
+      reduceTerminalActivity(running, {
+        type: "process-observed",
+        process: "node",
+        pid: 42,
+        ports: [3000],
+      }),
+    ).not.toBe(running);
+  });
 });

@@ -537,6 +537,7 @@ function bindSlot(slot: Slot, p: AcquireParams): void {
   const hadWebgl = !!slot.webglAddon;
   slot.retainedLeafId = null;
   slot.currentLeafId = p.leafId;
+  notifyBindingChange();
   slot.lastUsedAt = performance.now();
   transitionImeBridgeOwner(slot.imeState, p.leafId);
   slot.autoSuggest.setSessionContext(String(p.leafId));
@@ -775,6 +776,7 @@ function detachSlotFromLeaf(slot: Slot, retain: boolean): void {
   slot.host.style.visibility = "";
 
   slot.currentLeafId = null;
+  notifyBindingChange();
   slot.lastUsedAt = performance.now();
   transitionImeBridgeOwner(slot.imeState, null);
   scheduleWebglReap(slot);
@@ -864,6 +866,7 @@ function disposeSlot(slot: Slot): void {
   slot.host.remove();
   const i = slots.indexOf(slot);
   if (i >= 0) slots.splice(i, 1);
+  notifyBindingChange();
 }
 
 const WEBGL_RECOVERY_DELAY_MS = 250;
@@ -1082,6 +1085,25 @@ function applyCursorBlinkOnSlot(slot: Slot, focused: boolean): void {
   const desired = shouldCursorBlink(cursorBlinkEnabled, windowActive, focused);
   if (slot.term.options.cursorBlink === desired) return;
   slot.term.options.cursorBlink = desired;
+}
+
+const bindingListeners = new Set<() => void>();
+let bindingNotifyQueued = false;
+
+// Deferred to a microtask so listeners observe a fully bound or released slot.
+function notifyBindingChange(): void {
+  if (bindingNotifyQueued) return;
+  bindingNotifyQueued = true;
+  queueMicrotask(() => {
+    bindingNotifyQueued = false;
+    for (const listener of bindingListeners) listener();
+  });
+}
+
+/** Fires whenever a slot is bound to, released from or disposed under a leaf. */
+export function onSlotBindingChange(listener: () => void): () => void {
+  bindingListeners.add(listener);
+  return () => bindingListeners.delete(listener);
 }
 
 export function getSlotForLeaf(leafId: number): Slot | null {
