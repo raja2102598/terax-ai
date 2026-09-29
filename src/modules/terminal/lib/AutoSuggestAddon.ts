@@ -184,7 +184,12 @@ export class AutoSuggestAddon implements ITerminalAddon {
     // _ensureOverlay() on the first suggestion render.
 
     // Listen to data coming *from the user* (keyboard input).
-    const onDataDisp = terminal.onData((data) => this._onData(data));
+    // This listener is registered before the PTY writer; defer so matching
+    // never delays the keystroke's trip to the shell. Microtasks keep order
+    // and settle before the next key event (e.g. a Tab accept).
+    const onDataDisp = terminal.onData((data) =>
+      queueMicrotask(() => this._onData(data)),
+    );
     this._disposables.push(onDataDisp);
 
     // When the terminal is resized or scrolled, reposition or hide overlay.

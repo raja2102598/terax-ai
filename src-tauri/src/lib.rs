@@ -215,6 +215,10 @@ pub fn run() {
             if let Err(error) = control::start(_app.handle().clone(), control_for_setup.clone()) {
                 log::warn!("could not start Terax control server: {error}");
             }
+            #[cfg(target_os = "linux")]
+            if let Some(main) = _app.get_webview_window("main") {
+                modules::linux_window::tune_main_window(&main);
+            }
             #[cfg(target_os = "macos")]
             if let Some(main) = _app.get_webview_window("main") {
                 let handle = _app.handle().clone();

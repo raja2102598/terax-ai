@@ -11,16 +11,30 @@ import {
   MoreHorizontalIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
   lineFromThumbTop,
+  sameScrollState,
   type TerminalScrollState,
   thumbMetrics,
 } from "./lib/fastScroll";
 import { writeTerminalClipboard } from "./lib/terminalClipboard";
 
 export type ScrollMarker = { line: number; failed: boolean; label: string };
+
+const NO_MARKERS: ScrollMarker[] = [];
+
+function sameMarkers(a: ScrollMarker[], b: ScrollMarker[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    const x = a[i];
+    const y = b[i];
+    if (x.line !== y.line || x.failed !== y.failed || x.label !== y.label)
+      return false;
+  }
+  return true;
+}
 
 type Props = {
   controlId: string;
@@ -65,15 +79,54 @@ export function TerminalFastScrollbar({
   markers,
 }: Props) {
   const trackRef = useRef<HTMLDivElement>(null);
-  const [state, setState] = useState(getState);
+  const [view, setView] = useState(() => ({
+    state: getState(),
+    marks: markers?.() ?? NO_MARKERS,
+  }));
+  const { state, marks } = view;
 
   useEffect(() => {
-    const refresh = () => setState(getState());
-    refresh();
-    return subscribe(refresh);
-  }, [getState, subscribe]);
+    // Fires on every parsed write; coalesce to one read per frame and skip
+    // renders when nothing moved so streaming output never re-renders React.
+    let raf: number | null = null;
+    const read = () => {
+      raf = null;
+      const next = { state: getState(), marks: markers?.() ?? NO_MARKERS };
+      setView((prev) =>
+        sameScrollState(prev.state, next.state) &&
+        sameMarkers(prev.marks, next.marks)
+          ? prev
+          : next,
+      );
+    };
+    const schedule = () => {
+      if (raf === null) raf = requestAnimationFrame(read);
+    };
+    read();
+    const unsubscribe = subscribe(schedule);
+    return () => {
+      unsubscribe();
+      if (raf !== null) cancelAnimationFrame(raf);
+    };
+  }, [getState, subscribe, markers]);
 
-  const trackHeight = trackRef.current?.clientHeight ?? 0;
+  const [trackHeight, setTrackHeight] = useState(0);
+  const trackObserver = useRef<ResizeObserver | null>(null);
+
+  // Measured, not read during render: writes no longer force a re-render, so
+  // nothing else would pick up the height once the track mounts or resizes.
+  const attachTrack = useCallback((track: HTMLDivElement | null) => {
+    trackRef.current = track;
+    trackObserver.current?.disconnect();
+    trackObserver.current = null;
+    if (!track) return;
+    const measure = () => setTrackHeight(track.clientHeight);
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    trackObserver.current = new ResizeObserver(measure);
+    trackObserver.current.observe(track);
+  }, []);
+
   const metrics = thumbMetrics(state, trackHeight);
   const maxLine = Math.max(0, state.totalLines - state.viewportLines);
   const behind = Math.max(0, maxLine - state.line);
@@ -168,7 +221,7 @@ export function TerminalFastScrollbar({
         </DropdownMenuContent>
       </DropdownMenu>
       <div
-        ref={trackRef}
+        ref={attachTrack}
         className="terminal-fast-track"
         data-scrollable={scrollable}
         role="scrollbar"
@@ -186,7 +239,7 @@ export function TerminalFastScrollbar({
           move(event.clientY, metrics.height / 2);
         }}
       >
-        {markers?.().map((marker) => (
+        {marks.map((marker) => (
           <button
             type="button"
             key={`${marker.line}:${marker.label}`}

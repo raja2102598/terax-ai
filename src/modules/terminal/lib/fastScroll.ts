@@ -4,6 +4,17 @@ export type TerminalScrollState = {
   viewportLines: number;
 };
 
+export function sameScrollState(
+  a: TerminalScrollState,
+  b: TerminalScrollState,
+): boolean {
+  return (
+    a.line === b.line &&
+    a.totalLines === b.totalLines &&
+    a.viewportLines === b.viewportLines
+  );
+}
+
 export type ThumbMetrics = { top: number; height: number; maxTop: number };
 
 export function thumbMetrics(

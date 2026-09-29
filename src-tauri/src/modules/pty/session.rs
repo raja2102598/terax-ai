@@ -15,11 +15,18 @@ use crate::modules::workspace::WorkspaceEnv;
 
 const AGENT_EVENT: &str = "terax:agent-signal";
 
-// Flusher coalesces a short window after first-byte arrival so we send chunks,
-// not single bytes. MAX_IDLE is only a safety net for missed signals.
-const FLUSH_COALESCE: Duration = Duration::from_millis(4);
+// The first chunk after a quiet spell (keystroke echo, a prompt) flushes
+// immediately; while output keeps streaming, flushes are paced so each IPC
+// message carries a batch. Every message costs a webview eval (plus a fetch
+// above 1 KiB), so bulk output is paced to roughly one message per frame.
+// MAX_IDLE is only a safety net for missed signals.
+const FLUSH_QUIET: Duration = Duration::from_millis(12);
+const FLUSH_PACE_INTERACTIVE: Duration = Duration::from_millis(3);
+const FLUSH_PACE_BULK: Duration = Duration::from_millis(8);
+const FLUSH_BULK_BYTES: usize = 16 * 1024;
 const FLUSH_MAX_IDLE: Duration = Duration::from_millis(50);
-const READ_BUF: usize = 16 * 1024;
+// Linux pty buffers hold up to 64 KiB, so a flood drains in one read.
+const READ_BUF: usize = 64 * 1024;
 // Cap on buffered-but-not-yet-flushed bytes. On overflow we discard the
 // entire pending buffer and emit an SGR-reset + notice in its place.
 // Dropping a partial prefix would slice a CSI sequence in half and corrupt
@@ -238,6 +245,7 @@ pub fn spawn(
         .name("terax-pty-flusher".into())
         .spawn(move || {
             let (lock, cv) = &*pending_f;
+            let mut last_flush: Option<(Instant, usize)> = None;
             loop {
                 {
                     let mut g = lock.lock().unwrap();
@@ -249,16 +257,22 @@ pub fn spawn(
                         g = next;
                     }
                 }
-                // Coalesce a short window so a burst flushes as one chunk.
-                thread::sleep(FLUSH_COALESCE);
+                let delay = last_flush
+                    .map(|(at, len)| flush_delay(at.elapsed(), len))
+                    .unwrap_or(Duration::ZERO);
+                if !delay.is_zero() {
+                    thread::sleep(delay);
+                }
                 let chunk = std::mem::take(&mut *lock.lock().unwrap());
                 if chunk.is_empty() {
                     continue;
                 }
+                let len = chunk.len();
                 if let Err(e) = on_data_flush.send(Response::new(chunk)) {
                     log::debug!("pty flusher exiting, channel closed: {e}");
                     break;
                 }
+                last_flush = Some((Instant::now(), len));
             }
         })
         .expect("spawn pty flusher thread");
@@ -313,6 +327,64 @@ pub fn spawn(
         .expect("spawn pty waiter thread");
 
     Ok((session, size))
+}
+
+/// How long the flusher waits before sending newly pending bytes, given the
+/// time since the previous flush and that flush's size.
+fn flush_delay(since_last: Duration, last_len: usize) -> Duration {
+    if since_last >= FLUSH_QUIET {
+        return Duration::ZERO;
+    }
+    let pace = if last_len >= FLUSH_BULK_BYTES {
+        FLUSH_PACE_BULK
+    } else {
+        FLUSH_PACE_INTERACTIVE
+    };
+    pace.saturating_sub(since_last)
+}
+
+#[cfg(test)]
+mod flush_tests {
+    use super::*;
+
+    #[test]
+    fn first_bytes_after_quiet_flush_immediately() {
+        assert_eq!(flush_delay(FLUSH_QUIET, 10), Duration::ZERO);
+        assert_eq!(flush_delay(Duration::from_secs(5), 1 << 20), Duration::ZERO);
+    }
+
+    #[test]
+    fn small_streams_pace_at_interactive_rate() {
+        assert_eq!(flush_delay(Duration::ZERO, 64), FLUSH_PACE_INTERACTIVE);
+        assert_eq!(
+            flush_delay(Duration::from_millis(1), 64),
+            FLUSH_PACE_INTERACTIVE - Duration::from_millis(1)
+        );
+    }
+
+    #[test]
+    fn bulk_streams_pace_at_frame_rate() {
+        assert_eq!(flush_delay(Duration::ZERO, FLUSH_BULK_BYTES), FLUSH_PACE_BULK);
+        assert_eq!(
+            flush_delay(Duration::from_millis(5), FLUSH_BULK_BYTES),
+            FLUSH_PACE_BULK - Duration::from_millis(5)
+        );
+    }
+
+    #[test]
+    fn pace_elapsed_means_no_wait() {
+        assert_eq!(flush_delay(FLUSH_PACE_BULK, FLUSH_BULK_BYTES), Duration::ZERO);
+        assert_eq!(flush_delay(FLUSH_PACE_INTERACTIVE, 1), Duration::ZERO);
+    }
+
+    #[test]
+    fn delay_never_exceeds_bulk_pace() {
+        for ms in 0..20 {
+            for len in [0, 1, FLUSH_BULK_BYTES - 1, FLUSH_BULK_BYTES, 1 << 22] {
+                assert!(flush_delay(Duration::from_millis(ms), len) <= FLUSH_PACE_BULK);
+            }
+        }
+    }
 }
 
 #[cfg(all(test, unix))]

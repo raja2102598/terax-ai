@@ -5,6 +5,8 @@ pub mod control;
 pub mod fs;
 pub mod git;
 pub mod history;
+#[cfg(target_os = "linux")]
+pub mod linux_window;
 pub mod lsp;
 pub mod net;
 pub mod proc;
