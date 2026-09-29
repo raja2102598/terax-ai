@@ -11,7 +11,7 @@ import {
   MoreHorizontalIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
   lineFromThumbTop,
@@ -110,7 +110,23 @@ export function TerminalFastScrollbar({
     };
   }, [getState, subscribe, markers]);
 
-  const trackHeight = trackRef.current?.clientHeight ?? 0;
+  const [trackHeight, setTrackHeight] = useState(0);
+  const trackObserver = useRef<ResizeObserver | null>(null);
+
+  // Measured, not read during render: writes no longer force a re-render, so
+  // nothing else would pick up the height once the track mounts or resizes.
+  const attachTrack = useCallback((track: HTMLDivElement | null) => {
+    trackRef.current = track;
+    trackObserver.current?.disconnect();
+    trackObserver.current = null;
+    if (!track) return;
+    const measure = () => setTrackHeight(track.clientHeight);
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    trackObserver.current = new ResizeObserver(measure);
+    trackObserver.current.observe(track);
+  }, []);
+
   const metrics = thumbMetrics(state, trackHeight);
   const maxLine = Math.max(0, state.totalLines - state.viewportLines);
   const behind = Math.max(0, maxLine - state.line);
@@ -205,7 +221,7 @@ export function TerminalFastScrollbar({
         </DropdownMenuContent>
       </DropdownMenu>
       <div
-        ref={trackRef}
+        ref={attachTrack}
         className="terminal-fast-track"
         data-scrollable={scrollable}
         role="scrollbar"
