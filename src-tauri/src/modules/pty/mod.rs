@@ -268,8 +268,14 @@ pub struct PtyActivity {
 
 #[tauri::command]
 pub fn pty_activity(state: tauri::State<PtyState>, id: u32) -> Result<PtyActivity, String> {
-    let sessions = state.sessions.read().unwrap();
-    let session = sessions.get(&id).ok_or_else(|| "no session".to_string())?;
+    // Clone out so the /proc scan below never holds the session map lock.
+    let session = state
+        .sessions
+        .read()
+        .unwrap()
+        .get(&id)
+        .cloned()
+        .ok_or_else(|| "no session".to_string())?;
     let shell_pid = session.shell_pid;
     if shell_pid == 0 {
         return Ok(PtyActivity { process: None, pid: None, ports: Vec::new() });
@@ -322,29 +328,61 @@ fn process_tree_pids(root: u32) -> std::collections::HashSet<u32> {
     pids
 }
 
+// Reads /proc directly instead of spawning `ss`: this runs every couple of
+// seconds per busy terminal, and a fork+exec per poll is most of its cost.
 #[cfg(target_os = "linux")]
 fn listening_ports(pids: &std::collections::HashSet<u32>) -> Vec<u16> {
-    let output = std::process::Command::new("ss")
-        .args(["-H", "-ltnp"])
-        .output()
-        .ok();
-    let Some(output) = output.filter(|output| output.status.success()) else {
+    let mut inodes = std::collections::HashSet::new();
+    for pid in pids {
+        let Ok(fds) = std::fs::read_dir(format!("/proc/{pid}/fd")) else {
+            continue;
+        };
+        for fd in fds.flatten() {
+            if let Ok(link) = std::fs::read_link(fd.path()) {
+                if let Some(inode) = link.to_str().and_then(socket_inode) {
+                    inodes.insert(inode);
+                }
+            }
+        }
+    }
+    if inodes.is_empty() {
         return Vec::new();
-    };
-    ports_from_ss(&String::from_utf8_lossy(&output.stdout), pids)
+    }
+    let tables: Vec<String> = ["/proc/net/tcp", "/proc/net/tcp6"]
+        .iter()
+        .filter_map(|path| std::fs::read_to_string(path).ok())
+        .collect();
+    listening_ports_from_tables(tables.iter().map(String::as_str), &inodes)
 }
 
 #[cfg(target_os = "linux")]
-fn ports_from_ss(ss: &str, pids: &std::collections::HashSet<u32>) -> Vec<u16> {
+fn socket_inode(link: &str) -> Option<u64> {
+    link.strip_prefix("socket:[")?.strip_suffix(']')?.parse().ok()
+}
+
+/// Ports of LISTEN sockets in `/proc/net/tcp{,6}` tables whose inode is owned
+/// by the terminal's process tree.
+#[cfg(target_os = "linux")]
+fn listening_ports_from_tables<'a>(
+    tables: impl Iterator<Item = &'a str>,
+    inodes: &std::collections::HashSet<u64>,
+) -> Vec<u16> {
+    const TCP_LISTEN: &str = "0A";
     let mut ports = Vec::new();
-    for line in ss.lines() {
-        if !pids.iter().any(|pid| line.contains(&format!("pid={pid}"))) {
-            continue;
-        }
-        let Some(address) = line.split_whitespace().nth(3) else {
+    for line in tables.flat_map(|table| table.lines().skip(1)) {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        let (Some(local), Some(state), Some(inode)) = (fields.get(1), fields.get(3), fields.get(9))
+        else {
             continue;
         };
-        let Some(port) = address.rsplit(':').next().and_then(|v| v.parse::<u16>().ok()) else {
+        if *state != TCP_LISTEN || !inode.parse().is_ok_and(|i: u64| inodes.contains(&i)) {
+            continue;
+        }
+        let Some(port) = local
+            .rsplit(':')
+            .next()
+            .and_then(|hex| u16::from_str_radix(hex, 16).ok())
+        else {
             continue;
         };
         if !ports.contains(&port) {
@@ -399,15 +437,44 @@ fn shell_has_children(shell_pid: u32) -> bool {
 
 #[cfg(all(test, target_os = "linux"))]
 mod activity_tests {
-    use super::ports_from_ss;
+    use super::{listening_ports, listening_ports_from_tables, socket_inode};
     use std::collections::HashSet;
 
     #[test]
-    fn finds_only_ports_owned_by_the_terminal_process_tree() {
-        let pids = HashSet::from([41, 99]);
-        let ss = "LISTEN 0 4096 127.0.0.1:5173 0.0.0.0:* users:((\"vite\",pid=41,fd=20))\nLISTEN 0 128 *:3000 *:* users:((\"other\",pid=7,fd=4))\nLISTEN 0 128 [::1]:1420 [::]:* users:((\"tauri\",pid=99,fd=8))";
+    fn finds_a_real_listener_through_proc() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let pids = HashSet::from([std::process::id()]);
+        assert!(listening_ports(&pids).contains(&port));
+        assert!(listening_ports(&HashSet::from([u32::MAX])).is_empty());
+    }
 
-        assert_eq!(ports_from_ss(ss, &pids), vec![1420, 5173]);
+    const TCP: &str = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 0100007F:1435 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 41001 1 0000000000000000 100 0 0 10 0
+   1: 00000000:0BB8 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 7 1 0000000000000000 100 0 0 10 0
+   2: 0100007F:1435 0100007F:D2F0 01 00000000:00000000 00:00000000 00000000  1000        0 41001 1 0000000000000000 20 4 30 10 -1";
+    const TCP6: &str = "  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 00000000000000000000000001000000:0594 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 99001 1 0000000000000000 100 0 0 10 0";
+
+    #[test]
+    fn finds_only_listening_ports_owned_by_the_terminal_process_tree() {
+        let inodes = HashSet::from([41001, 99001]);
+        assert_eq!(listening_ports_from_tables([TCP, TCP6].into_iter(), &inodes), vec![1428, 5173]);
+    }
+
+    #[test]
+    fn foreign_and_established_sockets_are_ignored() {
+        assert!(listening_ports_from_tables([TCP].into_iter(), &HashSet::from([12345])).is_empty());
+        let only_established = TCP.lines().take(1).chain(TCP.lines().skip(3)).collect::<Vec<_>>().join("\n");
+        assert!(listening_ports_from_tables([only_established.as_str()].into_iter(), &HashSet::from([41001])).is_empty());
+    }
+
+    #[test]
+    fn parses_socket_fd_links() {
+        assert_eq!(socket_inode("socket:[41001]"), Some(41001));
+        assert_eq!(socket_inode("pipe:[41001]"), None);
+        assert_eq!(socket_inode("/dev/pts/3"), None);
+        assert_eq!(socket_inode("socket:[x]"), None);
     }
 }
 

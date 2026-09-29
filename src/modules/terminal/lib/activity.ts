@@ -66,6 +66,14 @@ export function reduceTerminalActivity(
     };
   }
   if (event.type === "process-observed") {
+    // Polled every couple of seconds; keep identity when nothing moved so
+    // subscribers skip the re-render.
+    if (
+      current.process === event.process &&
+      current.pid === event.pid &&
+      samePorts(current.ports, event.ports)
+    )
+      return current;
     return {
       ...current,
       process: event.process,
@@ -73,7 +81,12 @@ export function reduceTerminalActivity(
       ports: event.ports,
     };
   }
+  if (samePorts(current.ports, event.ports)) return current;
   return { ...current, ports: event.ports };
+}
+
+function samePorts(a: readonly number[], b: readonly number[]): boolean {
+  return a.length === b.length && a.every((port, i) => port === b[i]);
 }
 
 const snapshots = new Map<number, TerminalActivitySnapshot>();
@@ -87,7 +100,10 @@ export function reportTerminalActivity(
   leafId: number,
   event: TerminalActivityEvent,
 ): void {
-  snapshots.set(leafId, reduceTerminalActivity(snapshotFor(leafId), event));
+  const current = snapshotFor(leafId);
+  const next = reduceTerminalActivity(current, event);
+  if (next === current) return;
+  snapshots.set(leafId, next);
   for (const listener of listeners) listener();
 }
 

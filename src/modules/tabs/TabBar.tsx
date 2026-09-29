@@ -54,6 +54,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { formatRuntime, msUntilRuntimeChange } from "./lib/runtime";
 import { labelFor } from "./lib/tabLabel";
 import type { EditorTab, Tab, TerminalTab } from "./lib/useTabs";
 import { NewTabMenu } from "./NewTabMenu";
@@ -610,7 +611,6 @@ export function TabBar({
 function TerminalActivityBadge({ tab }: { tab: TerminalTab }) {
   const activity = useTerminalActivity(tab.activeLeafId);
   if (activity.state === "idle") return null;
-  const elapsed = activity.startedAt ? Date.now() - activity.startedAt : 0;
   const label =
     activity.state === "running"
       ? "Terminal task running"
@@ -621,7 +621,7 @@ function TerminalActivityBadge({ tab }: { tab: TerminalTab }) {
           : "Last terminal task exited with unknown status";
   const color =
     activity.state === "running"
-      ? "bg-primary animate-pulse"
+      ? "bg-primary animate-pulse [animation-iteration-count:3]"
       : activity.state === "success"
         ? "bg-emerald-500"
         : activity.state === "failed"
@@ -639,10 +639,8 @@ function TerminalActivityBadge({ tab }: { tab: TerminalTab }) {
           {activity.process}
         </span>
       ) : null}
-      {activity.state === "running" && elapsed >= 1_000 ? (
-        <span className="shrink-0 tabular-nums text-[10px] text-muted-foreground">
-          {formatRuntime(elapsed)}
-        </span>
+      {activity.state === "running" && activity.startedAt !== null ? (
+        <RunningTime startedAt={activity.startedAt} />
       ) : null}
       {activity.ports[0] ? (
         <span className="shrink-0 font-mono text-[10px] text-muted-foreground">
@@ -683,12 +681,22 @@ function TerminalActivityMenu({ tab }: { tab: TerminalTab }) {
   );
 }
 
-function formatRuntime(ms: number): string {
-  const seconds = Math.max(0, Math.floor(ms / 1000));
-  const minutes = Math.floor(seconds / 60);
-  return minutes
-    ? `${minutes}:${String(seconds % 60).padStart(2, "0")}`
-    : `${seconds}s`;
+function RunningTime({ startedAt }: { startedAt: number }) {
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    const timer = setTimeout(
+      () => setNow(Date.now()),
+      msUntilRuntimeChange(now - startedAt),
+    );
+    return () => clearTimeout(timer);
+  }, [now, startedAt]);
+  const elapsed = now - startedAt;
+  if (elapsed < 1_000) return null;
+  return (
+    <span className="shrink-0 tabular-nums text-[10px] text-muted-foreground">
+      {formatRuntime(elapsed)}
+    </span>
+  );
 }
 
 function DropIndicator() {
