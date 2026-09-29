@@ -86,11 +86,16 @@ impl AgentDetector {
             return;
         }
 
-        for &b in input {
+        let mut i = 0;
+        while i < input.len() {
+            let b = input[i];
+            i += 1;
             match self.state {
                 State::Ground => {
                     if b == ESC {
                         self.state = State::Esc;
+                    } else {
+                        i += input[i..].iter().position(|&c| c == ESC).unwrap_or(input.len() - i);
                     }
                 }
                 State::Esc => match b {
@@ -459,5 +464,34 @@ mod tests {
         seq.extend_from_slice(&[ESC, ST_FINAL]);
         assert!(run(&mut d, &seq).is_empty());
         assert_eq!(run(&mut d, &osc("777;notify;Terax;attention")), vec![Transition::Attention]);
+    }
+
+    fn bytes_with_sequences() -> impl proptest::strategy::Strategy<Value = Vec<u8>> {
+        use proptest::prelude::*;
+        prop::collection::vec(
+            prop_oneof![
+                prop::collection::vec(any::<u8>(), 0..32),
+                Just(osc("133;C;claude")),
+                Just(osc("133;D;0")),
+                Just(osc("777;notify;Terax;attention")),
+                Just(b"\x1b[31mred\x1b[0m".to_vec()),
+            ],
+            0..24,
+        )
+        .prop_map(|parts| parts.concat())
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn chunking_never_changes_transitions(input in bytes_with_sequences(), split in 1usize..64) {
+            let mut whole = AgentDetector::new();
+            let expected = run(&mut whole, &input);
+            let mut chunked = AgentDetector::new();
+            let mut got = Vec::new();
+            for chunk in input.chunks(split) {
+                got.extend(run(&mut chunked, chunk));
+            }
+            proptest::prop_assert_eq!(got, expected);
+        }
     }
 }

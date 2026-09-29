@@ -51,7 +51,10 @@ impl DaFilter {
             return;
         }
 
-        for &b in input {
+        let mut i = 0;
+        while i < input.len() {
+            let b = input[i];
+            i += 1;
             match self.state {
                 State::Idle => {
                     if b == ESC {
@@ -59,7 +62,11 @@ impl DaFilter {
                         self.hold.clear();
                         self.hold.push(b);
                     } else {
-                        out.push(b);
+                        // Bulk-copy the plain run up to the next ESC: colored
+                        // output is mostly text between short escapes.
+                        let run = input[i..].iter().position(|&c| c == ESC).unwrap_or(input.len() - i);
+                        out.extend_from_slice(&input[i - 1..i + run]);
+                        i += run;
                     }
                 }
                 State::AfterEsc => {
@@ -337,4 +344,26 @@ mod tests {
         assert!(out.is_empty());
         assert_eq!(replies, vec![DA1_REPLY.to_vec()]);
     }
+
+    proptest::proptest! {
+        #[test]
+        fn after_output_every_byte_passes_through_in_order(
+            input in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..2048),
+            split in 1usize..300,
+        ) {
+            let mut f = DaFilter::new();
+            let _ = run(&mut f, b"prompt");
+            let mut stream = input.clone();
+            // A final byte in 0x40..=0x7e terminates any open CSI or escape.
+            stream.push(b'z');
+            let mut out = Vec::new();
+            for chunk in stream.chunks(split) {
+                let (o, replies) = run(&mut f, chunk);
+                proptest::prop_assert!(replies.is_empty());
+                out.extend(o);
+            }
+            proptest::prop_assert_eq!(out, stream);
+        }
+    }
 }
+

@@ -15,12 +15,26 @@ import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
   lineFromThumbTop,
+  sameScrollState,
   type TerminalScrollState,
   thumbMetrics,
 } from "./lib/fastScroll";
 import { writeTerminalClipboard } from "./lib/terminalClipboard";
 
 export type ScrollMarker = { line: number; failed: boolean; label: string };
+
+const NO_MARKERS: ScrollMarker[] = [];
+
+function sameMarkers(a: ScrollMarker[], b: ScrollMarker[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    const x = a[i];
+    const y = b[i];
+    if (x.line !== y.line || x.failed !== y.failed || x.label !== y.label)
+      return false;
+  }
+  return true;
+}
 
 type Props = {
   controlId: string;
@@ -65,13 +79,36 @@ export function TerminalFastScrollbar({
   markers,
 }: Props) {
   const trackRef = useRef<HTMLDivElement>(null);
-  const [state, setState] = useState(getState);
+  const [view, setView] = useState(() => ({
+    state: getState(),
+    marks: markers?.() ?? NO_MARKERS,
+  }));
+  const { state, marks } = view;
 
   useEffect(() => {
-    const refresh = () => setState(getState());
-    refresh();
-    return subscribe(refresh);
-  }, [getState, subscribe]);
+    // Fires on every parsed write; coalesce to one read per frame and skip
+    // renders when nothing moved so streaming output never re-renders React.
+    let raf: number | null = null;
+    const read = () => {
+      raf = null;
+      const next = { state: getState(), marks: markers?.() ?? NO_MARKERS };
+      setView((prev) =>
+        sameScrollState(prev.state, next.state) &&
+        sameMarkers(prev.marks, next.marks)
+          ? prev
+          : next,
+      );
+    };
+    const schedule = () => {
+      if (raf === null) raf = requestAnimationFrame(read);
+    };
+    read();
+    const unsubscribe = subscribe(schedule);
+    return () => {
+      unsubscribe();
+      if (raf !== null) cancelAnimationFrame(raf);
+    };
+  }, [getState, subscribe, markers]);
 
   const trackHeight = trackRef.current?.clientHeight ?? 0;
   const metrics = thumbMetrics(state, trackHeight);
@@ -186,7 +223,7 @@ export function TerminalFastScrollbar({
           move(event.clientY, metrics.height / 2);
         }}
       >
-        {markers?.().map((marker) => (
+        {marks.map((marker) => (
           <button
             type="button"
             key={`${marker.line}:${marker.label}`}

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { lineFromThumbTop, thumbMetrics } from "./fastScroll";
+import { lineFromThumbTop, sameScrollState, thumbMetrics } from "./fastScroll";
 
 describe("terminal fast scroll", () => {
   const state = { line: 450, totalLines: 1000, viewportLines: 100 };
@@ -22,5 +22,12 @@ describe("terminal fast scroll", () => {
     expect(lineFromThumbTop(225, 450, state)).toBe(450);
     expect(lineFromThumbTop(999, 450, state)).toBe(900);
     expect(lineFromThumbTop(-10, 450, state)).toBe(0);
+  });
+
+  it("treats field-equal scroll states as unchanged", () => {
+    expect(sameScrollState(state, { ...state })).toBe(true);
+    expect(sameScrollState(state, { ...state, line: 451 })).toBe(false);
+    expect(sameScrollState(state, { ...state, totalLines: 1001 })).toBe(false);
+    expect(sameScrollState(state, { ...state, viewportLines: 99 })).toBe(false);
   });
 });
