@@ -135,7 +135,7 @@ fn array_value_to_json(array: &dyn Array, index: usize) -> serde_json::Value {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn fs_read_parquet(path: String, workspace: Option<WorkspaceEnv>) -> Result<ParquetResult, String> {
     let workspace = WorkspaceEnv::from_option(workspace);
     let p = resolve_path(&path, &workspace);

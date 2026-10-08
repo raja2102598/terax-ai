@@ -266,7 +266,7 @@ pub struct PtyActivity {
     pub ports: Vec<u16>,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn pty_activity(state: tauri::State<PtyState>, id: u32) -> Result<PtyActivity, String> {
     // Clone out so the /proc scan below never holds the session map lock.
     let session = state

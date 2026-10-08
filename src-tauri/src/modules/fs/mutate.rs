@@ -271,7 +271,7 @@ pub fn fs_rename(from: String, to: String, workspace: Option<WorkspaceEnv>) -> R
 }
 
 /// Moves a path without clobbering unless replacement was explicitly approved.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn fs_move(
     from: String,
     to: String,
@@ -343,7 +343,7 @@ fn fs_move_impl(
 
 /// Deletes a file or directory (recursively for dirs). Callers are
 /// responsible for confirming destructive operations with the user.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn fs_delete(path: String, workspace: Option<WorkspaceEnv>) -> Result<(), String> {
     let workspace = WorkspaceEnv::from_option(workspace);
     let p = resolve_path(&path, &workspace);
@@ -354,7 +354,7 @@ pub fn fs_delete(path: String, workspace: Option<WorkspaceEnv>) -> Result<(), St
 }
 
 /// Extracts a supported archive (.zip, .tar.gz, .tgz) into the same directory.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn fs_extract(path: String, workspace: Option<WorkspaceEnv>) -> Result<(), String> {
     let workspace = WorkspaceEnv::from_option(workspace);
     let p = resolve_path(&path, &workspace);
@@ -383,7 +383,7 @@ pub fn fs_extract(path: String, workspace: Option<WorkspaceEnv>) -> Result<(), S
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn fs_delete_batch(
     paths: Vec<String>,
     root: String,
@@ -438,7 +438,7 @@ fn copy_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Resu
 /// Copies external files/dirs into a destination directory, recursively for
 /// dirs. Sources are absolute OS paths (from a drag-drop); only the destination
 /// is workspace-resolved. Refuses to overwrite existing entries.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn fs_copy(
     sources: Vec<String>,
     dest_dir: String,

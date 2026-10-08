@@ -51,38 +51,53 @@ impl FrameDecoder {
     pub fn push(&mut self, bytes: &[u8]) -> Result<Vec<String>, FramingError> {
         self.buf.extend_from_slice(bytes);
         let mut out = Vec::new();
-        loop {
+        // Consumed frames advance `pos`; the buffer is compacted once per push,
+        // not once per frame, so a burst of small messages stays linear.
+        let mut pos = 0;
+        let result = loop {
             match self.phase {
                 Phase::Headers { scan_from } => {
-                    match find_terminator(&self.buf, scan_from) {
+                    match find_terminator(&self.buf, pos.max(scan_from)) {
                         Some(header_end) => {
-                            let len = parse_content_length(&self.buf[..header_end])?;
+                            let len = match parse_content_length(&self.buf[pos..header_end]) {
+                                Ok(len) => len,
+                                Err(e) => break Err(e),
+                            };
                             if len > MAX_CONTENT_LEN {
-                                return Err(FramingError::ContentTooLarge(len));
+                                break Err(FramingError::ContentTooLarge(len));
                             }
-                            self.buf.drain(..header_end + HEADER_TERMINATOR.len());
+                            pos = header_end + HEADER_TERMINATOR.len();
                             self.phase = Phase::Body { len };
                         }
                         None => {
                             // Terminator may straddle this chunk and the next.
+                            let from = self.buf.len().saturating_sub(HEADER_TERMINATOR.len() - 1);
                             self.phase = Phase::Headers {
-                                scan_from: self.buf.len().saturating_sub(HEADER_TERMINATOR.len() - 1),
+                                scan_from: from.max(pos),
                             };
-                            return Ok(out);
+                            break Ok(());
                         }
                     }
                 }
                 Phase::Body { len } => {
-                    if self.buf.len() < len {
-                        return Ok(out);
+                    if self.buf.len() - pos < len {
+                        break Ok(());
                     }
-                    let rest = self.buf.split_off(len);
-                    let payload = std::mem::replace(&mut self.buf, rest);
-                    out.push(String::from_utf8(payload).map_err(|_| FramingError::InvalidUtf8)?);
-                    self.phase = Phase::Headers { scan_from: 0 };
+                    let payload = self.buf[pos..pos + len].to_vec();
+                    pos += len;
+                    match String::from_utf8(payload) {
+                        Ok(text) => out.push(text),
+                        Err(_) => break Err(FramingError::InvalidUtf8),
+                    }
+                    self.phase = Phase::Headers { scan_from: pos };
                 }
             }
+        };
+        self.buf.drain(..pos);
+        if let Phase::Headers { scan_from } = &mut self.phase {
+            *scan_from = scan_from.saturating_sub(pos);
         }
+        result.map(|()| out)
     }
 }
 
@@ -239,6 +254,21 @@ mod tests {
             d.push(&rest).unwrap(),
             vec![r#"{"first":1}"#.to_string(), r#"{"second":2}"#.to_string()]
         );
+    }
+
+    #[test]
+    fn burst_of_frames_in_one_chunk_then_split_tail() {
+        let mut chunk = Vec::new();
+        for i in 0..1000 {
+            chunk.extend(frame(&format!("{{\"id\":{i}}}")));
+        }
+        let tail = frame(r#"{"id":"tail"}"#);
+        chunk.extend_from_slice(&tail[..7]);
+        let mut d = FrameDecoder::default();
+        let out = d.push(&chunk).unwrap();
+        assert_eq!(out.len(), 1000);
+        assert_eq!(out[999], r#"{"id":999}"#);
+        assert_eq!(d.push(&tail[7..]).unwrap(), vec![r#"{"id":"tail"}"#.to_string()]);
     }
 
     #[test]
