@@ -30,6 +30,7 @@ import {
   useTerminalActivity,
 } from "@/modules/terminal";
 import { writeTerminalClipboard } from "@/modules/terminal/lib/terminalClipboard";
+import { usePreferencesStore } from "@/modules/settings/preferences";
 import {
   ArrowRight01Icon,
   Cancel01Icon,
@@ -111,6 +112,15 @@ export function TabBar({
   const [draggingId, setDraggingId] = useState<number | null>(null);
   const [dropGap, setDropGap] = useState<number | null>(null);
   const [showAllLanguages, setShowAllLanguages] = useState(false);
+  const tabWidth = usePreferencesStore((s) => s.tabWidth);
+  const labelMaxW =
+    tabWidth === "narrow"
+      ? "max-w-28"
+      : tabWidth === "compact"
+        ? "max-w-40"
+        : compact
+          ? "max-w-48"
+          : "max-w-80";
   const drag = useRef<{
     pointerId: number;
     startX: number;
@@ -348,13 +358,14 @@ export function TabBar({
                     }
                   }}
                   className={cn(
-                    "group relative z-[1] h-7 shrink-0 justify-between gap-1.5 rounded-md bg-transparent text-xs transition-colors data-active:bg-transparent dark:data-active:bg-transparent",
+                    "group relative z-[1] h-7 shrink-0 justify-between rounded-md bg-transparent text-xs transition-colors data-active:bg-transparent dark:data-active:bg-transparent",
+                    tabWidth === "default" ? "gap-1.5" : "gap-1",
                     isNew && "terax-tab-in",
                     isActive
                       ? "text-foreground dark:text-foreground"
                       : "text-muted-foreground hover:text-foreground/80 dark:text-muted-foreground",
                     draggingId === t.id && "opacity-50",
-                    compact
+                    compact || tabWidth !== "default"
                       ? "px-1.5!"
                       : tabs.length === 1
                         ? "px-2!"
@@ -363,8 +374,9 @@ export function TabBar({
                 >
                   <span
                     className={cn(
-                      "flex min-w-0 items-center gap-1.5",
-                      compact ? "max-w-48" : "max-w-80",
+                      "flex min-w-0 items-center",
+                      tabWidth === "default" ? "gap-1.5" : "gap-1",
+                      labelMaxW,
                     )}
                   >
                     {t.kind === "editor" ? (
@@ -475,7 +487,10 @@ export function TabBar({
                       {labelFor(t)}
                     </span>
                     {t.kind === "terminal" ? (
-                      <TerminalActivityBadge tab={t} />
+                      <TerminalActivityBadge
+                        tab={t}
+                        minimal={tabWidth === "narrow"}
+                      />
                     ) : null}
                     {t.kind === "editor" && t.dirty ? (
                       <span
@@ -608,7 +623,14 @@ export function TabBar({
   );
 }
 
-function TerminalActivityBadge({ tab }: { tab: TerminalTab }) {
+function TerminalActivityBadge({
+  tab,
+  minimal,
+}: {
+  tab: TerminalTab;
+  /** Dot only: drop process name, timer and port to save width. */
+  minimal?: boolean;
+}) {
   const activity = useTerminalActivity(tab.activeLeafId);
   if (activity.state === "idle") return null;
   const label =
@@ -634,19 +656,23 @@ function TerminalActivityBadge({ tab }: { tab: TerminalTab }) {
         className={cn("size-1.5 shrink-0 rounded-full", color)}
       />
       <span className="sr-only">{label}</span>
-      {activity.state === "running" && activity.process ? (
-        <span className="max-w-20 truncate font-mono text-[10px] text-muted-foreground">
-          {activity.process}
-        </span>
-      ) : null}
-      {activity.state === "running" && activity.startedAt !== null ? (
-        <RunningTime startedAt={activity.startedAt} />
-      ) : null}
-      {activity.ports[0] ? (
-        <span className="shrink-0 font-mono text-[10px] text-muted-foreground">
-          :{activity.ports[0]}
-        </span>
-      ) : null}
+      {minimal ? null : (
+        <>
+          {activity.state === "running" && activity.process ? (
+            <span className="max-w-20 truncate font-mono text-[10px] text-muted-foreground">
+              {activity.process}
+            </span>
+          ) : null}
+          {activity.state === "running" && activity.startedAt !== null ? (
+            <RunningTime startedAt={activity.startedAt} />
+          ) : null}
+          {activity.ports[0] ? (
+            <span className="shrink-0 font-mono text-[10px] text-muted-foreground">
+              :{activity.ports[0]}
+            </span>
+          ) : null}
+        </>
+      )}
     </>
   );
 }

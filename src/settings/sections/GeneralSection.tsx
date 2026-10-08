@@ -30,6 +30,7 @@ import {
   setExplorerGitDecorations,
   setRestoreWindowState,
   setShowHidden,
+  setTabWidth,
   setTerminalCursorBlink,
   setTerminalCursorStyle,
   setTerminalFontFamily,
@@ -79,6 +80,11 @@ const TERMINAL_CURSOR_STYLES = [
   { value: "block", label: "Block" },
   { value: "underline", label: "Underline" },
 ] as const;
+const TAB_WIDTHS = [
+  { value: "default", label: "Default" },
+  { value: "compact", label: "Compact" },
+  { value: "narrow", label: "Narrow" },
+] as const;
 const LETTER_SPACINGS = [-4, -3, -2, -1, 0, 1, 2, 3, 4] as const;
 
 type ShellInfo = { name: string; path: string; integrated: boolean };
@@ -100,6 +106,7 @@ export function GeneralSection() {
   const autostart = usePreferencesStore((s) => s.autostart);
   const restoreWindowState = usePreferencesStore((s) => s.restoreWindowState);
   const showHidden = usePreferencesStore((s) => s.showHidden);
+  const tabWidth = usePreferencesStore((s) => s.tabWidth);
   const explorerGitDecorations = usePreferencesStore(
     (s) => s.explorerGitDecorations,
   );
@@ -233,6 +240,31 @@ export function GeneralSection() {
             onValueChange={(v) => void setZoomLevel(v[0] ?? 1)}
           />
         </div>
+      </div>
+
+      <div className="flex flex-col gap-2">
+        <Label>Tabs</Label>
+        <SettingRow
+          title="Tab width"
+          description="Maximum width of tabs in the tab bar. Narrow also hides the running process name and timer."
+        >
+          <Select value={tabWidth} onValueChange={(v) => void setTabWidth(v)}>
+            <SelectTrigger value={tabWidth} className="h-8 w-28 text-[12px]">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {TAB_WIDTHS.map((w) => (
+                <SelectItem
+                  key={w.value}
+                  value={w.value}
+                  className="text-[12px]"
+                >
+                  {w.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </SettingRow>
       </div>
 
       <div className="flex flex-col gap-2">
