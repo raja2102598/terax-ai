@@ -81,6 +81,22 @@ pub(super) fn drop_session(session: Arc<Session>) {
     drop(session);
 }
 
+// Polls `is_finished` until it returns true or `timeout` elapses.
+#[cfg(any(unix, test))]
+fn finished_within(is_finished: impl Fn() -> bool, timeout: Duration, poll: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if is_finished() {
+            return true;
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return false;
+        }
+        thread::sleep(poll.min(deadline - now));
+    }
+}
+
 struct ChildKillGuard {
     killer: Option<Box<dyn ChildKiller + Send + Sync>>,
 }
@@ -179,6 +195,7 @@ pub fn spawn(
     let first_byte = Arc::new(AtomicBool::new(false));
 
     let pending_r = pending.clone();
+    let done_r = done.clone();
     let writer_for_da = writer.clone();
     let app_reader = app.clone();
     let first_byte_r = first_byte;
@@ -193,6 +210,9 @@ pub fn spawn(
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) => break,
+                    // Torn down while a background job still held the tty:
+                    // stop here so the master handles are released.
+                    Ok(_) if done_r.load(Ordering::Acquire) => break,
                     Ok(n) => {
                         if !first_byte_r.load(Ordering::Relaxed) {
                             first_byte_r.store(true, Ordering::Release);
@@ -302,8 +322,17 @@ pub fn spawn(
                 }
             }
             #[cfg(not(windows))]
-            if let Err(e) = reader_thread.join() {
-                log::error!("pty reader thread panicked: {e:?}");
+            if finished_within(
+                || reader_thread.is_finished(),
+                Duration::from_millis(500),
+                Duration::from_millis(5),
+            ) {
+                if let Err(e) = reader_thread.join() {
+                    log::error!("pty reader thread panicked: {e:?}");
+                }
+            } else {
+                // A background job still holds the pty slave, so EOF never comes.
+                log::warn!("pty reader still open after shell exit; tearing down without it");
             }
             let (lock, cv) = &*pending_e;
             let tail = std::mem::take(&mut *lock.lock().unwrap());
@@ -386,6 +415,49 @@ mod flush_tests {
                 assert!(flush_delay(Duration::from_millis(ms), len) <= FLUSH_PACE_BULK);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod reader_wait_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn finished_within_returns_immediately_when_already_finished() {
+        let start = Instant::now();
+        assert!(finished_within(|| true, Duration::from_secs(5), Duration::from_millis(5)));
+        assert!(start.elapsed() < Duration::from_millis(500));
+    }
+
+    #[test]
+    fn finished_within_sees_a_thread_that_finishes_before_deadline() {
+        let handle = thread::spawn(|| thread::sleep(Duration::from_millis(50)));
+        assert!(finished_within(
+            || handle.is_finished(),
+            Duration::from_secs(5),
+            Duration::from_millis(5),
+        ));
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn finished_within_gives_up_after_roughly_the_deadline() {
+        let polls = Cell::new(0u32);
+        let start = Instant::now();
+        let finished = finished_within(
+            || {
+                polls.set(polls.get() + 1);
+                false
+            },
+            Duration::from_millis(100),
+            Duration::from_millis(5),
+        );
+        let elapsed = start.elapsed();
+        assert!(!finished);
+        assert!(elapsed >= Duration::from_millis(100), "returned early: {elapsed:?}");
+        assert!(elapsed < Duration::from_millis(400), "returned late: {elapsed:?}");
+        assert!(polls.get() > 1);
     }
 }
 
