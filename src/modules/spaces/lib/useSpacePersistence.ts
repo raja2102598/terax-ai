@@ -9,7 +9,7 @@ import {
 } from "@/modules/terminal/lib/rendererPool";
 import {
   deleteSnapshot,
-  putSnapshot,
+  putSnapshotIfChanged,
 } from "@/modules/terminal/lib/snapshotStore";
 import { setPrivateLeaves } from "@/modules/terminal/lib/useTerminalSession";
 import { leafIds } from "@/modules/terminal/lib/panes";
@@ -77,7 +77,9 @@ export function useSpacePersistence({
         void deleteSnapshot(leafId);
         return;
       }
-      void putSnapshot(leafId, serializeSlot(slot));
+      void putSnapshotIfChanged(leafId, slot.revision, () =>
+        serializeSlot(slot),
+      );
     });
 
     const groups = new Map<string, Tab[]>();

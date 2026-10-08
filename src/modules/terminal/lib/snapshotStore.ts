@@ -1,10 +1,12 @@
 import type { SerializeOutput } from "./rendererPool";
+import { SnapshotLedger } from "./snapshotLedger";
 
 const DB_NAME = "terax-terminal-snapshots";
 const STORE_NAME = "snapshots";
 const DB_VERSION = 1;
 
 let dbPromise: Promise<IDBDatabase> | null = null;
+const ledger = new SnapshotLedger();
 
 function getDb(): Promise<IDBDatabase> {
   if (dbPromise) return dbPromise;
@@ -26,7 +28,7 @@ function getDb(): Promise<IDBDatabase> {
   return dbPromise;
 }
 
-export async function putSnapshot(leafId: number, data: SerializeOutput): Promise<void> {
+async function writeSnapshot(leafId: number, data: SerializeOutput): Promise<void> {
   try {
     const db = await getDb();
     return new Promise((resolve, reject) => {
@@ -37,8 +39,26 @@ export async function putSnapshot(leafId: number, data: SerializeOutput): Promis
       req.onerror = () => reject(req.error);
     });
   } catch (e) {
+    ledger.forget(leafId);
     console.warn("[terax] Failed to save terminal snapshot to IDB", e);
   }
+}
+
+export function putSnapshot(leafId: number, data: SerializeOutput): Promise<void> {
+  ledger.forget(leafId);
+  return writeSnapshot(leafId, data);
+}
+
+// `produce` serializes the whole buffer, so it only runs when the terminal
+// changed since the last write for this leaf.
+export function putSnapshotIfChanged(
+  leafId: number,
+  revision: number,
+  produce: () => SerializeOutput,
+): Promise<void> {
+  if (ledger.isCurrent(leafId, revision)) return Promise.resolve();
+  ledger.record(leafId, revision);
+  return writeSnapshot(leafId, produce());
 }
 
 export async function getSnapshot(leafId: number): Promise<SerializeOutput | null> {
@@ -58,6 +78,7 @@ export async function getSnapshot(leafId: number): Promise<SerializeOutput | nul
 }
 
 export async function deleteSnapshot(leafId: number): Promise<void> {
+  ledger.forget(leafId);
   try {
     const db = await getDb();
     return new Promise((resolve, reject) => {

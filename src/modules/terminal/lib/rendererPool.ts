@@ -1,7 +1,10 @@
 import { openExternalUrl } from "@/lib/external-link";
 import { resolveFontFamily } from "@/lib/fonts";
 import { usePreferencesStore } from "@/modules/settings/preferences";
-import type { TerminalCursorStyle } from "@/modules/settings/store";
+import {
+  TERMINAL_SNAPSHOT_SCROLLBACK_CAP,
+  type TerminalCursorStyle,
+} from "@/modules/settings/store";
 import { buildTerminalTheme } from "@/styles/terminalTheme";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
@@ -26,11 +29,11 @@ import { readClipboardText, writeClipboardText } from "./clipboard";
 import { terminalReadlineSequence } from "./keymap";
 import { createTerminalLinkHandler } from "./terminalLinks";
 import { pasteIntoTerminal } from "./terminalPaste";
+import { planWebglRecovery, webglSuspended } from "./webglRecovery";
 
 export const POOL_MAX_SIZE = 5;
 const FIT_DEBOUNCE_MS = 8;
 const PTY_RESIZE_DEBOUNCE_MS = 256;
-const SNAPSHOT_SCROLLBACK_CAP = 5_000;
 
 export type SlotAdapter = {
   resolveLeaf(leafId: number): LeafBridge | null;
@@ -63,6 +66,7 @@ export type Slot = {
   readonly host: HTMLDivElement;
   webglAddon: WebglAddon | null;
   webglCanvases: HTMLCanvasElement[];
+  webglLosses: number[];
   currentLeafId: number | null;
   // Leaf whose buffer this slot still holds intact after release; serialized
   // only if another leaf steals the slot.
@@ -80,11 +84,14 @@ export type Slot = {
   lastW: number;
   lastH: number;
   lastUsedAt: number;
+  // Advances whenever the buffer or grid changes; never reused across slots.
+  revision: number;
   imeState: ImeBridgeState;
   autoSuggest: AutoSuggestAddon;
 };
 
 const slots: Slot[] = [];
+let revisionClock = 0;
 let recyclerEl: HTMLDivElement | null = null;
 let adapter: SlotAdapter | null = null;
 let configuredFont: RendererFont | null = null;
@@ -264,6 +271,7 @@ function createSlot(): Slot {
     host,
     webglAddon: null,
     webglCanvases: [],
+    webglLosses: [],
     currentLeafId: null,
     retainedLeafId: null,
     parked: false,
@@ -279,9 +287,15 @@ function createSlot(): Slot {
     lastW: 0,
     lastH: 0,
     lastUsedAt: 0,
+    revision: ++revisionClock,
     imeState: createImeBridgeState(),
     autoSuggest,
   };
+  const bumpRevision = () => {
+    slot.revision = ++revisionClock;
+  };
+  term.onWriteParsed(bumpRevision);
+  term.onResize(bumpRevision);
 
   // Some WKWebView builds bypass xterm's composition events. The pure bridge
   // repairs that path and stands down when native composition is observed.
@@ -738,7 +752,7 @@ export function serializeSlot(slot: Slot): SerializeOutput {
   let snapshot: string | null = null;
   try {
     const cap = Math.min(
-      SNAPSHOT_SCROLLBACK_CAP,
+      TERMINAL_SNAPSHOT_SCROLLBACK_CAP,
       usePreferencesStore.getState().terminalScrollback,
     );
     snapshot = slot.serializeAddon.serialize({ scrollback: cap });
@@ -869,7 +883,6 @@ function disposeSlot(slot: Slot): void {
   notifyBindingChange();
 }
 
-const WEBGL_RECOVERY_DELAY_MS = 250;
 // Below this a re-shown slot is fresh enough to trust; above it, repaint on
 // unhide to defeat silent GPU/context staleness.
 const SLOT_STALE_MS = 10_000;
@@ -880,6 +893,7 @@ const IDLE_SLOTS_KEEP_WARM = 1;
 function attachWebgl(slot: Slot): void {
   if (slot.webglAddon || !slot.term.element) return;
   if (!usePreferencesStore.getState().terminalWebglEnabled) return;
+  if (webglSuspended(slot.webglLosses, Date.now())) return;
   const elem = slot.term.element;
   const before = new Set<HTMLCanvasElement>(
     elem.querySelectorAll<HTMLCanvasElement>("canvas"),
@@ -898,6 +912,14 @@ function attachWebgl(slot: Slot): void {
       // Recovery: WebKit may transiently lose contexts on sleep/wake or GPU
       // reset; without re-attach the slot would silently fall back to DOM
       // forever. Defer past WebKit's reset window before retrying.
+      const plan = planWebglRecovery(slot.webglLosses, Date.now());
+      slot.webglLosses = plan.losses;
+      if (plan.retryInMs === null) {
+        console.warn(
+          "[terax-webgl] context lost repeatedly, using DOM renderer",
+        );
+        return;
+      }
       setTimeout(() => {
         if (slot.webglAddon || slot.currentLeafId === null || slot.parked)
           return;
@@ -908,7 +930,7 @@ function attachWebgl(slot: Slot): void {
             slot.term.refresh(0, slot.term.rows - 1);
           } catch {}
         }
-      }, WEBGL_RECOVERY_DELAY_MS);
+      }, plan.retryInMs);
     });
     slot.term.loadAddon(webgl);
     const after = elem.querySelectorAll<HTMLCanvasElement>("canvas");

@@ -315,6 +315,8 @@ export const TERMINAL_SCROLLBACK_MAX = 50_000;
 export const TERMINAL_SCROLLBACK_PRESETS = [
   500, 1000, 2000, 5000, 10_000, 25_000,
 ] as const;
+// Lines written to the restart snapshot; anything above this only lives in RAM.
+export const TERMINAL_SNAPSHOT_SCROLLBACK_CAP = 5_000;
 
 export const DEFAULT_PREFERENCES: Preferences = {
   theme: "system",

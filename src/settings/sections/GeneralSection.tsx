@@ -45,6 +45,7 @@ import {
   setZoomLevel,
   TERMINAL_FONT_SIZES,
   TERMINAL_SCROLLBACK_PRESETS,
+  TERMINAL_SNAPSHOT_SCROLLBACK_CAP,
 } from "@/modules/settings/store";
 import { useTheme } from "@/modules/theme";
 import {
@@ -539,7 +540,7 @@ export function GeneralSection() {
         </SettingRow>
         <SettingRow
           title="Scrollback"
-          description="Lines of history kept per terminal. Higher uses more RAM (~3 KB / line)."
+          description={`Lines of history kept per terminal. Higher uses more RAM (~3 KB / line). Only the last ${TERMINAL_SNAPSHOT_SCROLLBACK_CAP.toLocaleString()} lines are restored after a restart.`}
         >
           <Select
             value={String(terminalScrollback)}
