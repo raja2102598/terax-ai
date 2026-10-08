@@ -2,7 +2,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 const { openUrl } = vi.hoisted(() => ({ openUrl: vi.fn() }));
 
-vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl }));
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: (command: string, args: { url: string }) =>
+    command === "open_external_url"
+      ? openUrl(args.url)
+      : Promise.reject(new Error(`unexpected command ${command}`)),
+}));
 
 import { createTerminalLinkHandler } from "./terminalLinks";
 

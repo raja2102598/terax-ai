@@ -9,6 +9,7 @@ pub mod history;
 pub mod linux_window;
 pub mod lsp;
 pub mod net;
+pub mod opener;
 pub mod proc;
 pub mod pty;
 pub mod secrets;

@@ -1,10 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const opener = vi.hoisted(() => ({
-  openUrl: vi.fn(async () => undefined),
+  openUrl: vi.fn(async (_url: string) => undefined),
 }));
 
-vi.mock("@tauri-apps/plugin-opener", () => opener);
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: (command: string, args: { url: string }) =>
+    command === "open_external_url"
+      ? opener.openUrl(args.url)
+      : Promise.reject(new Error(`unexpected command ${command}`)),
+}));
 
 import { isExternalUrl, openExternalUrl } from "./external-link";
 
