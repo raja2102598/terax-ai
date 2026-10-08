@@ -44,11 +44,6 @@ async function writeSnapshot(leafId: number, data: SerializeOutput): Promise<voi
   }
 }
 
-export function putSnapshot(leafId: number, data: SerializeOutput): Promise<void> {
-  ledger.forget(leafId);
-  return writeSnapshot(leafId, data);
-}
-
 // `produce` serializes the whole buffer, so it only runs when the terminal
 // changed since the last write for this leaf.
 export function putSnapshotIfChanged(

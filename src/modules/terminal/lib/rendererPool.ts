@@ -42,7 +42,7 @@ export type SlotAdapter = {
   isLeafBlocks(leafId: number): boolean;
   isLeafBusy(leafId: number): boolean;
   isLeafVisible(leafId: number): boolean;
-  storeSnapshot(leafId: number, out: SerializeOutput): void;
+  storeSnapshot(leafId: number, out: SerializeOutput, revision: number): void;
 };
 
 export type LeafBridge = {
@@ -525,7 +525,11 @@ export function acquireSlot(params: AcquireParams): Slot {
     pick.slot.retainedLeafId !== null &&
     pick.slot.retainedLeafId !== params.leafId
   ) {
-    adapter?.storeSnapshot(pick.slot.retainedLeafId, serializeSlot(pick.slot));
+    adapter?.storeSnapshot(
+      pick.slot.retainedLeafId,
+      serializeSlot(pick.slot),
+      pick.slot.revision,
+    );
     discardRetention(pick.slot);
   }
   bindSlot(pick.slot, params);
@@ -850,7 +854,7 @@ function reapIdleSlot(slot: Slot): void {
   const surplus = idle.slice(0, idle.length - IDLE_SLOTS_KEEP_WARM);
   if (!surplus.includes(slot)) return;
   if (slot.retainedLeafId !== null) {
-    adapter?.storeSnapshot(slot.retainedLeafId, serializeSlot(slot));
+    adapter?.storeSnapshot(slot.retainedLeafId, serializeSlot(slot), slot.revision);
   }
   disposeSlot(slot);
 }
@@ -1067,9 +1071,16 @@ export function applyScrollback(value: number): void {
   }
 }
 
+// Every mounted pane calls applyTheme; reassigning an equal theme still makes
+// xterm repaint, so each slot remembers the theme it last received.
+const appliedThemeKey = new WeakMap<Slot, string>();
+
 export function applyTheme(): void {
   const theme = buildTerminalTheme();
+  const key = JSON.stringify(theme);
   for (const slot of slots) {
+    if (appliedThemeKey.get(slot) === key) continue;
+    appliedThemeKey.set(slot, key);
     slot.term.options.theme = theme;
   }
 }

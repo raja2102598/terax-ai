@@ -44,7 +44,7 @@ const PRUNE_DIRS: &[&str] = &[
     "__pycache__",
 ];
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn fs_search(
     root: String,
     query: String,
@@ -153,7 +153,7 @@ pub struct ListFilesResult {
     pub truncated: bool,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn fs_list_files(
     root: String,
     limit: Option<usize>,
@@ -224,7 +224,7 @@ pub fn fs_list_files(
         }
     }
 
-    files.sort_by_key(|a| a.to_lowercase());
+    files.sort_by_cached_key(|a| a.to_lowercase());
     Ok(ListFilesResult { files, truncated })
 }
 

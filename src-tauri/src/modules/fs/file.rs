@@ -105,7 +105,7 @@ fn read_file_sync(p: &Path, force: bool) -> Result<ReadResult, String> {
 
 /// Reads a binary file and returns its contents as a base64 data URL string.
 /// Used for rendering images and other media inline in the editor.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn fs_read_binary(path: String, workspace: Option<WorkspaceEnv>) -> Result<String, String> {
     use std::io::Read;
 
@@ -125,9 +125,6 @@ pub fn fs_read_binary(path: String, workspace: Option<WorkspaceEnv>) -> Result<S
     let mut buf = Vec::with_capacity(meta.len() as usize);
     file.read_to_end(&mut buf).map_err(|e| e.to_string())?;
 
-    use base64::Engine;
-    let b64 = base64::engine::general_purpose::STANDARD.encode(&buf);
-
     // Determine MIME type from extension
     let ext = p
         .extension()
@@ -146,7 +143,12 @@ pub fn fs_read_binary(path: String, workspace: Option<WorkspaceEnv>) -> Result<S
         _ => "application/octet-stream",
     };
 
-    Ok(format!("data:{};base64,{}", mime, b64))
+    use base64::Engine;
+    let prefix = format!("data:{mime};base64,");
+    let mut out = String::with_capacity(prefix.len() + buf.len().div_ceil(3) * 4);
+    out.push_str(&prefix);
+    base64::engine::general_purpose::STANDARD.encode_string(&buf, &mut out);
+    Ok(out)
 }
 
 #[derive(Serialize, Clone)]

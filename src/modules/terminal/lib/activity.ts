@@ -112,12 +112,15 @@ export function clearTerminalActivity(leafId: number): void {
   for (const listener of listeners) listener();
 }
 
+// Module-level so React does not resubscribe on every render of a consumer.
+function subscribe(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+
 export function useTerminalActivity(leafId: number): TerminalActivitySnapshot {
   return useSyncExternalStore(
-    (listener) => {
-      listeners.add(listener);
-      return () => listeners.delete(listener);
-    },
+    subscribe,
     () => snapshotFor(leafId),
     () => EMPTY_ACTIVITY,
   );

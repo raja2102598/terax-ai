@@ -554,7 +554,11 @@ export function useSourceControl(
       });
       return;
     }
-    setState((current) => ({ ...current, lastRemoteError: null }));
+    setState((current) =>
+      current.lastRemoteError === null
+        ? current
+        : { ...current, lastRemoteError: null },
+    );
     const run = () => {
       const root = stateRef.current.repo?.repoRoot;
       const sameRepo = repositoryContainsContext(root ?? null, contextPath);

@@ -32,7 +32,7 @@ fn detect_delimiter(line: &str) -> u8 {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn fs_read_csv(path: String, workspace: Option<WorkspaceEnv>) -> Result<CsvResult, String> {
     let workspace = WorkspaceEnv::from_option(workspace);
     let p = resolve_path(&path, &workspace);
