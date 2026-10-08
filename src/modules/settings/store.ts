@@ -31,6 +31,7 @@ export type BackgroundKind = "none" | "image";
 
 export type TerminalCursorStyle = "bar" | "block" | "underline";
 export type TerminalScrollbarMode = "auto" | "always" | "hidden";
+export type TabWidth = "default" | "compact" | "narrow";
 
 export const EDITOR_THEMES = [
   "kanagawa",
@@ -161,6 +162,7 @@ export type Preferences = {
   terminalWebglEnabled: boolean;
   terminalCursorBlink: boolean;
   terminalCursorStyle: TerminalCursorStyle;
+  tabWidth: TabWidth;
   terminalFontFamily: string;
   terminalFontWeight: string;
   terminalShell: string;
@@ -260,6 +262,7 @@ const KEY_EXPLORER_GIT_DECORATIONS = "explorerGitDecorations";
 const KEY_TERMINAL_WEBGL_ENABLED = "terminalWebglEnabled";
 const KEY_TERMINAL_CURSOR_BLINK = "terminalCursorBlink";
 const KEY_TERMINAL_CURSOR_STYLE = "terminalCursorStyle";
+const KEY_TAB_WIDTH = "tabWidth";
 const KEY_TERMINAL_FONT_FAMILY = "terminalFontFamily";
 const KEY_TERMINAL_FONT_WEIGHT = "terminalFontWeight";
 const KEY_TERMINAL_SHELL = "terminalShell";
@@ -355,6 +358,7 @@ export const DEFAULT_PREFERENCES: Preferences = {
   terminalWebglEnabled: true,
   terminalCursorBlink: false,
   terminalCursorStyle: "bar",
+  tabWidth: "default",
   terminalFontFamily: "",
   terminalFontWeight: "normal",
   terminalShell: "",
@@ -521,6 +525,7 @@ export async function loadPreferences(): Promise<Preferences> {
     terminalCursorStyle: coerceTerminalCursorStyle(
       get<unknown>(KEY_TERMINAL_CURSOR_STYLE),
     ),
+    tabWidth: coerceTabWidth(get<unknown>(KEY_TAB_WIDTH)),
     terminalFontFamily:
       get<string>(KEY_TERMINAL_FONT_FAMILY) ??
       DEFAULT_PREFERENCES.terminalFontFamily,
@@ -839,6 +844,16 @@ export async function setTerminalCursorStyle(value: unknown): Promise<void> {
   await writePref(KEY_TERMINAL_CURSOR_STYLE, coerceTerminalCursorStyle(value));
 }
 
+export function coerceTabWidth(value: unknown): TabWidth {
+  return value === "default" || value === "compact" || value === "narrow"
+    ? value
+    : DEFAULT_PREFERENCES.tabWidth;
+}
+
+export async function setTabWidth(value: unknown): Promise<void> {
+  await writePref(KEY_TAB_WIDTH, coerceTabWidth(value));
+}
+
 export async function setTerminalFontFamily(value: string): Promise<void> {
   await writePref(KEY_TERMINAL_FONT_FAMILY, value.trim());
 }
@@ -1045,6 +1060,7 @@ export async function onPreferencesChange(
     [KEY_TERMINAL_WEBGL_ENABLED]: "terminalWebglEnabled",
     [KEY_TERMINAL_CURSOR_BLINK]: "terminalCursorBlink",
     [KEY_TERMINAL_CURSOR_STYLE]: "terminalCursorStyle",
+    [KEY_TAB_WIDTH]: "tabWidth",
     [KEY_TERMINAL_FONT_FAMILY]: "terminalFontFamily",
     [KEY_TERMINAL_FONT_WEIGHT]: "terminalFontWeight",
     [KEY_TERMINAL_SCROLLBAR_MODE]: "terminalScrollbarMode",
