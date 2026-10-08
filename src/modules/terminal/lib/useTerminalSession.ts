@@ -26,7 +26,11 @@ import {
 } from "./osc-handlers";
 import { openPty, type PtySession } from "./pty-bridge";
 import { sanitizeDiskSnapshot } from "./snapshotModes";
-import { deleteSnapshot, getSnapshot, putSnapshot } from "./snapshotStore";
+import {
+  deleteSnapshot,
+  getSnapshot,
+  putSnapshotIfChanged,
+} from "./snapshotStore";
 import "../block/block.css";
 import type { ScrollMarker } from "../TerminalFastScrollbar";
 import { ensureAgentActivityListener, isAgentActivePty } from "./agentActivity";
@@ -437,8 +441,12 @@ type PtyActivity = {
 
 function startActivityMonitor(leafId: number, s: Session): void {
   if (s.activityTimer !== null) return;
+  // Each call scans the process tree: never overlap calls, and
+  // skip it while the window is hidden since nothing shows the result.
+  let inFlight = false;
   const refresh = () => {
-    if (!s.pty || s.disposed) return;
+    if (!s.pty || s.disposed || inFlight || document.hidden) return;
+    inFlight = true;
     void invoke<PtyActivity>("pty_activity", { id: s.pty.id })
       .then((activity) =>
         reportTerminalActivity(leafId, {
@@ -446,7 +454,10 @@ function startActivityMonitor(leafId: number, s: Session): void {
           ...activity,
         }),
       )
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => {
+        inFlight = false;
+      });
   };
   refresh();
   s.activityTimer = setInterval(refresh, 2000);
@@ -517,7 +528,7 @@ configureRendererPool({
   isLeafVisible(leafId) {
     return sessions.get(leafId)?.visibleNow ?? false;
   },
-  storeSnapshot(leafId, out) {
+  storeSnapshot(leafId, out, revision) {
     const s = sessions.get(leafId);
     if (!s) return;
     s.snapshot = out.snapshot;
@@ -529,7 +540,8 @@ configureRendererPool({
     // is the path that put private buffers on disk behind the persistence
     // layer's back.
     if (privateLeaves.has(leafId)) return;
-    void putSnapshot(leafId, out);
+    // The space flush may already have written this exact revision.
+    void putSnapshotIfChanged(leafId, revision, () => out);
   },
 });
 

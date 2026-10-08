@@ -47,6 +47,7 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { toast } from "sonner";
+import { useShallow } from "zustand/react/shallow";
 import {
   Fragment,
   useCallback,
@@ -734,18 +735,25 @@ function DropIndicator() {
   );
 }
 
+const NO_AGENT_STATUS = { state: null, agent: null } as const;
+
 function useTabAgentStatus(tab: Tab) {
-  const phases = useAgentActivityStore((s) => s.phases);
-  const agents = useAgentActivityStore((s) => s.agents);
-  if (tab.kind !== "terminal" || tab.private) {
-    return { state: null, agent: null } as const;
-  }
   const ptyIds: number[] = [];
-  for (const leaf of leafIds(tab.paneTree)) {
-    const id = ptyIdForLeaf(leaf);
-    if (id !== null) ptyIds.push(id);
+  if (tab.kind === "terminal" && !tab.private) {
+    for (const leaf of leafIds(tab.paneTree)) {
+      const id = ptyIdForLeaf(leaf);
+      if (id !== null) ptyIds.push(id);
+    }
   }
-  return tabAgentStatus(phases, agents, ptyIds);
+  // Shallow-compared derived status: a phase change in another tab's PTY
+  // must not re-render this icon.
+  return useAgentActivityStore(
+    useShallow((s) =>
+      ptyIds.length === 0
+        ? NO_AGENT_STATUS
+        : tabAgentStatus(s.phases, s.agents, ptyIds),
+    ),
+  );
 }
 
 export function TabIcon({ tab }: { tab: Tab }) {

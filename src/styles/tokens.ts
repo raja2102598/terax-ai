@@ -50,27 +50,29 @@ const KEYS = Object.keys(VAR_BY_KEY) as (keyof TerminalTokens)[];
 
 let probe: HTMLDivElement | null = null;
 
+// One child per token: every color is written before any is read, so the
+// whole read costs a single style recalc instead of one per token.
 function getProbe(): HTMLDivElement {
   if (probe?.isConnected) return probe;
   const el = document.createElement("div");
   el.setAttribute("aria-hidden", "true");
   el.style.cssText =
     "position:absolute;visibility:hidden;pointer-events:none;contain:strict;width:0;height:0;";
+  for (const k of KEYS) {
+    const child = document.createElement("span");
+    child.style.color = `var(${VAR_BY_KEY[k]})`;
+    el.appendChild(child);
+  }
   document.body.appendChild(el);
   probe = el;
   return el;
 }
 
-function resolve(el: HTMLDivElement, varName: string): string {
-  el.style.color = `var(${varName})`;
-  return getComputedStyle(el).color;
-}
-
 export function readTerminalTokens(): TerminalTokens {
-  const el = getProbe();
+  const children = getProbe().children;
   const out = {} as TerminalTokens;
-  for (const k of KEYS) {
-    out[k] = resolve(el, VAR_BY_KEY[k]);
-  }
+  KEYS.forEach((k, i) => {
+    out[k] = getComputedStyle(children[i]).color;
+  });
   return out;
 }
