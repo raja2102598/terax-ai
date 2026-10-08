@@ -112,6 +112,7 @@ export const TerminalPane = memo(
       <TerminalFastScrollbar
         controlId={`terminal-${leafId}`}
         mode={scrollbarMode}
+        active={visible}
         getState={session.getScrollState}
         subscribe={session.subscribeScroll}
         scrollToLine={session.scrollToLine}

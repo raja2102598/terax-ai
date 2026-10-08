@@ -15,7 +15,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
   lineFromThumbTop,
-  sameScrollState,
+  markerTop,
+  sameScrollPaint,
+  scrollPaint,
   type TerminalScrollState,
   thumbMetrics,
 } from "./lib/fastScroll";
@@ -25,12 +27,18 @@ export type ScrollMarker = { line: number; failed: boolean; label: string };
 
 const NO_MARKERS: ScrollMarker[] = [];
 
-function sameMarkers(a: ScrollMarker[], b: ScrollMarker[]): boolean {
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i++) {
-    const x = a[i];
-    const y = b[i];
-    if (x.line !== y.line || x.failed !== y.failed || x.label !== y.label)
+type View = { state: TerminalScrollState; marks: ScrollMarker[] };
+
+function sameMarkerPaint(a: View, b: View, trackHeight: number): boolean {
+  if (a.marks.length !== b.marks.length) return false;
+  for (let i = 0; i < a.marks.length; i++) {
+    const x = a.marks[i];
+    const y = b.marks[i];
+    if (x.failed !== y.failed || x.label !== y.label) return false;
+    if (
+      markerTop(x.line, a.state.totalLines, trackHeight) !==
+      markerTop(y.line, b.state.totalLines, trackHeight)
+    )
       return false;
   }
   return true;
@@ -39,6 +47,7 @@ function sameMarkers(a: ScrollMarker[], b: ScrollMarker[]): boolean {
 type Props = {
   controlId: string;
   mode: "auto" | "always" | "hidden";
+  active: boolean;
   getState: () => TerminalScrollState;
   subscribe: (notify: () => void) => () => void;
   scrollToLine: (line: number) => void;
@@ -72,6 +81,7 @@ function saveTranscript(text: string | null) {
 export function TerminalFastScrollbar({
   controlId,
   mode,
+  active,
   getState,
   subscribe,
   scrollToLine,
@@ -79,25 +89,40 @@ export function TerminalFastScrollbar({
   markers,
 }: Props) {
   const trackRef = useRef<HTMLDivElement>(null);
-  const [view, setView] = useState(() => ({
+  const [view, setView] = useState<View>(() => ({
     state: getState(),
     marks: markers?.() ?? NO_MARKERS,
   }));
   const { state, marks } = view;
+  const paintedRef = useRef(view);
+  const [trackHeight, setTrackHeight] = useState(0);
+  const trackHeightRef = useRef(0);
+  const trackObserver = useRef<ResizeObserver | null>(null);
+  const live = active && mode !== "hidden";
 
   useEffect(() => {
-    // Fires on every parsed write; coalesce to one read per frame and skip
-    // renders when nothing moved so streaming output never re-renders React.
+    if (!live) return;
+    // Fires on every parsed write. Read once per frame and only hand React a
+    // new view when a painted pixel would move.
     let raf: number | null = null;
     const read = () => {
       raf = null;
-      const next = { state: getState(), marks: markers?.() ?? NO_MARKERS };
-      setView((prev) =>
-        sameScrollState(prev.state, next.state) &&
-        sameMarkers(prev.marks, next.marks)
-          ? prev
-          : next,
-      );
+      const next: View = {
+        state: getState(),
+        marks: markers?.() ?? NO_MARKERS,
+      };
+      const prev = paintedRef.current;
+      const height = trackHeightRef.current;
+      if (
+        sameScrollPaint(
+          scrollPaint(prev.state, height),
+          scrollPaint(next.state, height),
+        ) &&
+        sameMarkerPaint(prev, next, height)
+      )
+        return;
+      paintedRef.current = next;
+      setView(next);
     };
     const schedule = () => {
       if (raf === null) raf = requestAnimationFrame(read);
@@ -108,52 +133,73 @@ export function TerminalFastScrollbar({
       unsubscribe();
       if (raf !== null) cancelAnimationFrame(raf);
     };
-  }, [getState, subscribe, markers]);
-
-  const [trackHeight, setTrackHeight] = useState(0);
-  const trackObserver = useRef<ResizeObserver | null>(null);
+  }, [live, getState, subscribe, markers]);
 
   // Measured, not read during render: writes no longer force a re-render, so
   // nothing else would pick up the height once the track mounts or resizes.
-  const attachTrack = useCallback((track: HTMLDivElement | null) => {
-    trackRef.current = track;
-    trackObserver.current?.disconnect();
-    trackObserver.current = null;
-    if (!track) return;
-    const measure = () => setTrackHeight(track.clientHeight);
-    measure();
-    if (typeof ResizeObserver === "undefined") return;
-    trackObserver.current = new ResizeObserver(measure);
-    trackObserver.current.observe(track);
-  }, []);
+  const attachTrack = useCallback(
+    (track: HTMLDivElement | null) => {
+      trackRef.current = track;
+      trackObserver.current?.disconnect();
+      trackObserver.current = null;
+      if (!track) return;
+      const measure = () => {
+        trackHeightRef.current = track.clientHeight;
+        setTrackHeight(track.clientHeight);
+        const next: View = {
+          state: getState(),
+          marks: markers?.() ?? NO_MARKERS,
+        };
+        paintedRef.current = next;
+        setView(next);
+      };
+      measure();
+      if (typeof ResizeObserver === "undefined") return;
+      trackObserver.current = new ResizeObserver(measure);
+      trackObserver.current.observe(track);
+    },
+    [getState, markers],
+  );
 
   const metrics = thumbMetrics(state, trackHeight);
   const maxLine = Math.max(0, state.totalLines - state.viewportLines);
   const behind = Math.max(0, maxLine - state.line);
   const scrollable = maxLine > 0;
 
+  // The rendered view lags a tail-following buffer on purpose, so every
+  // interaction resolves against the live terminal state.
+  const liveMaxLine = (now: TerminalScrollState) =>
+    Math.max(0, now.totalLines - now.viewportLines);
+
   const move = (clientY: number, grabOffset: number) => {
     const rect = trackRef.current?.getBoundingClientRect();
     if (!rect) return;
+    const now = getState();
     scrollToLine(
-      lineFromThumbTop(clientY - rect.top - grabOffset, metrics.maxTop, state),
+      lineFromThumbTop(
+        clientY - rect.top - grabOffset,
+        thumbMetrics(now, rect.height).maxTop,
+        now,
+      ),
     );
   };
 
   const onKeyDown = (event: React.KeyboardEvent) => {
-    const page = Math.max(1, state.viewportLines - 1);
+    const now = getState();
+    const end = liveMaxLine(now);
+    const page = Math.max(1, now.viewportLines - 1);
     const destinations: Record<string, number> = {
-      ArrowUp: state.line - 1,
-      ArrowDown: state.line + 1,
-      PageUp: state.line - page,
-      PageDown: state.line + page,
+      ArrowUp: now.line - 1,
+      ArrowDown: now.line + 1,
+      PageUp: now.line - page,
+      PageDown: now.line + page,
       Home: 0,
-      End: maxLine,
+      End: end,
     };
     const next = destinations[event.key];
     if (next === undefined) return;
     event.preventDefault();
-    scrollToLine(Math.max(0, Math.min(maxLine, next)));
+    scrollToLine(Math.max(0, Math.min(end, next)));
   };
 
   if (mode === "hidden") return null;
@@ -246,7 +292,7 @@ export function TerminalFastScrollbar({
             className="terminal-scroll-marker"
             data-failed={marker.failed}
             style={{
-              top: `${(marker.line / Math.max(1, state.totalLines)) * 100}%`,
+              top: markerTop(marker.line, state.totalLines, trackHeight),
             }}
             title={marker.label}
             aria-label={`Jump to ${marker.label}`}
@@ -284,7 +330,7 @@ export function TerminalFastScrollbar({
           type="button"
           className="terminal-jump-live"
           title={`${behind} lines behind · Jump to latest`}
-          onClick={() => scrollToLine(maxLine)}
+          onClick={() => scrollToLine(liveMaxLine(getState()))}
         >
           <HugeiconsIcon icon={ArrowDown01Icon} size={13} />
           <span>{behind > 999 ? "999+" : behind}</span>
