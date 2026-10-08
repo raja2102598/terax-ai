@@ -3,6 +3,7 @@ import {
   usePreferencesStore,
 } from "@/modules/settings/preferences";
 import { BG_OPACITY_RENDER_FACTOR } from "@/modules/settings/store";
+import { useBlurredBackground } from "@/modules/theme/lib/useBlurredBackground";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
@@ -27,13 +28,23 @@ function BackgroundImage({ fastImageId }: { fastImageId: string | null }) {
   const imageId = hydrated ? storeImageId : fastImageId;
   const opacity = usePreferencesStore((s) => s.backgroundOpacity);
   const blur = usePreferencesStore((s) => s.backgroundBlur);
-  const [state, setState] = useState<{ url: string; animated: boolean } | null>(
-    null,
-  );
+  const [state, setState] = useState<{
+    id: string;
+    url: string;
+    blob: Blob;
+    animated: boolean;
+  } | null>(null);
   const [visible, setVisible] = useState(false);
   const lastUrlRef = useRef<string | null>(null);
   const resizing = useWindowResizing(RESIZE_IDLE_MS);
   const docHidden = useDocumentHidden();
+  const staticSource = state && !state.animated && blur > 0 ? state : null;
+  const blurred = useBlurredBackground(
+    staticSource?.blob ?? null,
+    staticSource?.id ?? null,
+    blur,
+    !resizing,
+  );
 
   useEffect(() => {
     if (!imageId) return;
@@ -50,7 +61,7 @@ function BackgroundImage({ fastImageId }: { fastImageId: string | null }) {
       const t = blob.type.toLowerCase();
       const animated =
         t === "image/gif" || t === "image/apng" || t === "image/webp";
-      setState({ url, animated });
+      setState({ id: imageId, url, blob, animated });
       rafId = requestAnimationFrame(() => {
         rafId = null;
         if (alive) setVisible(true);
@@ -76,8 +87,11 @@ function BackgroundImage({ fastImageId }: { fastImageId: string | null }) {
 
   const suspendAnimated = animated && (resizing || docHidden);
   const blurActive = !animated && blur > 0 && !resizing;
+  const preblurPending = blurred?.status === "pending";
+  const preblurredUrl = blurred?.status === "ready" ? blurred.url : null;
+  const hideLayer = suspendAnimated || preblurPending;
   const renderedOpacity =
-    visible && !suspendAnimated ? opacity * BG_OPACITY_RENDER_FACTOR : 0;
+    visible && !hideLayer ? opacity * BG_OPACITY_RENDER_FACTOR : 0;
 
   return createPortal(
     <div
@@ -88,11 +102,11 @@ function BackgroundImage({ fastImageId }: { fastImageId: string | null }) {
         inset: 0,
         zIndex: OVERLAY_Z,
         pointerEvents: "none",
-        backgroundImage: suspendAnimated ? "none" : `url(${url})`,
+        backgroundImage: hideLayer ? "none" : `url(${preblurredUrl ?? url})`,
         backgroundSize: "cover",
         backgroundPosition: "center",
         opacity: renderedOpacity,
-        filter: blurActive ? `blur(${blur}px)` : undefined,
+        filter: blurActive && !preblurredUrl ? `blur(${blur}px)` : undefined,
         transform: "translateZ(0)",
         transition: `opacity ${FADE_IN_MS}ms ease-out`,
       }}
