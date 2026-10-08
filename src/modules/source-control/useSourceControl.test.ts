@@ -87,4 +87,17 @@ describe("beginSourceControlRefresh", () => {
       localError: null,
     });
   });
+
+  it("keeps the same state object for a background refresh that changes nothing", () => {
+    const settled = { ...loaded, localError: null };
+    expect(beginSourceControlRefresh(settled, "/old/repo", true, true)).toBe(
+      settled,
+    );
+  });
+
+  it("still shows loading for a background refresh into another repository", () => {
+    expect(
+      beginSourceControlRefresh(loaded, "/new/repo", false, true).isLoading,
+    ).toBe(true);
+  });
 });

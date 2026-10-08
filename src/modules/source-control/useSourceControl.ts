@@ -5,6 +5,11 @@ import {
 } from "@/modules/ai/lib/native";
 import { useWorkspaceEnvStore, workspaceScopeKey } from "@/modules/workspace";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  keepIfUnchanged,
+  sameGitRepoInfo,
+  sameGitStatusSnapshot,
+} from "./sameSourceControl";
 
 const AUTO_FETCH_THROTTLE_MS = 5 * 60_000;
 const AUTO_FETCH_LRU_LIMIT = 16;
@@ -44,6 +49,7 @@ export type SourceControlSummary = {
   ) => void;
   refresh: (options?: {
     remote?: SourceControlRefreshMode;
+    background?: boolean;
   }) => Promise<void>;
   runRemoteAction: (
     mode?: SourceControlRemoteActionMode,
@@ -83,6 +89,7 @@ type RefreshableSourceControlState = Pick<
 type InflightRefresh = {
   contextKey: string;
   mode: SourceControlRefreshMode;
+  background: boolean;
   promise: Promise<void>;
 };
 
@@ -121,17 +128,22 @@ export function repositoryContainsContext(
 
 export function beginSourceControlRefresh<
   T extends RefreshableSourceControlState,
->(current: T, contextPath: string, reuseCurrentRepository: boolean): T {
-  return {
+>(
+  current: T,
+  contextPath: string,
+  reuseCurrentRepository: boolean,
+  background: boolean = false,
+): T {
+  return keepIfUnchanged(current, {
     ...current,
     contextPath,
     repo: reuseCurrentRepository ? current.repo : null,
     status: reuseCurrentRepository ? current.status : null,
     hasRepo: reuseCurrentRepository ? current.hasRepo : false,
-    isLoading: true,
+    isLoading: reuseCurrentRepository && background ? current.isLoading : true,
     localError: null,
     lastRemoteError: reuseCurrentRepository ? current.lastRemoteError : null,
-  };
+  });
 }
 
 function normalizeError(error: unknown): string {
@@ -279,7 +291,10 @@ export function useSourceControl(
   );
 
   const doRefresh = useCallback(
-    async (remoteMode: SourceControlRefreshMode): Promise<void> => {
+    async (
+      remoteMode: SourceControlRefreshMode,
+      background: boolean,
+    ): Promise<void> => {
       const refreshContextKey = contextKey;
       if (
         !enabledRef.current ||
@@ -313,7 +328,12 @@ export function useSourceControl(
         : null;
 
       setState((current) =>
-        beginSourceControlRefresh(current, contextPath, !!reusableRoot),
+        beginSourceControlRefresh(
+          current,
+          contextPath,
+          !!reusableRoot,
+          background,
+        ),
       );
 
       try {
@@ -403,15 +423,19 @@ export function useSourceControl(
         }
 
         if (!isCurrentRequest()) return;
-        setState((current) => ({
-          ...current,
-          repo,
-          status,
-          hasRepo: true,
-          isLoading: false,
-          localError: null,
-          lastRemoteError: nextRemoteError,
-        }));
+        setState((current) =>
+          keepIfUnchanged(current, {
+            ...current,
+            repo: sameGitRepoInfo(current.repo, repo) ? current.repo : repo,
+            status: sameGitStatusSnapshot(current.status, status)
+              ? current.status
+              : status,
+            hasRepo: true,
+            isLoading: false,
+            localError: null,
+            lastRemoteError: nextRemoteError,
+          }),
+        );
       } catch (error) {
         if (!isCurrentRequest()) return;
         setState((current) => ({
@@ -432,22 +456,32 @@ export function useSourceControl(
   );
 
   const refresh = useCallback(
-    async (options?: { remote?: SourceControlRefreshMode }) => {
+    async (options?: {
+      remote?: SourceControlRefreshMode;
+      background?: boolean;
+    }) => {
       const remoteMode = options?.remote ?? "never";
+      const background = options?.background ?? false;
       const inflight = inflightRef.current;
       if (inflight?.contextKey === contextKey) {
         const cur = inflight.mode;
         const upgrade =
           (cur === "never" && remoteMode !== "never") ||
-          (cur === "auto" && remoteMode === "always");
+          (cur === "auto" && remoteMode === "always") ||
+          (inflight.background && !background);
         if (!upgrade) return inflight.promise;
       }
-      const run = doRefresh(remoteMode).finally(() => {
+      const run = doRefresh(remoteMode, background).finally(() => {
         if (inflightRef.current?.promise === run) {
           inflightRef.current = null;
         }
       });
-      inflightRef.current = { contextKey, mode: remoteMode, promise: run };
+      inflightRef.current = {
+        contextKey,
+        mode: remoteMode,
+        background,
+        promise: run,
+      };
       return run;
     },
     [contextKey, doRefresh],
@@ -533,7 +567,7 @@ export function useSourceControl(
         );
         return;
       }
-      void refresh({ remote: "never" });
+      void refresh({ remote: "never", background: true });
     };
     const idle =
       typeof window.requestIdleCallback === "function"
@@ -561,7 +595,7 @@ export function useSourceControl(
         timer = 0;
         const elapsed = Date.now() - lastRefreshAtRef.current;
         if (elapsed < FOCUS_REFRESH_MIN_INTERVAL_MS) return;
-        void refresh({ remote: "never" });
+        void refresh({ remote: "never", background: true });
       }, 400);
     };
     window.addEventListener("focus", onFocus);
