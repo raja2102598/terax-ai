@@ -369,10 +369,7 @@ export function useFileTree(rootPath: string | null, options?: Options) {
         });
         addWatch(parentPath);
       }
-      setNodes((curr) => {
-        if (!curr[parentPath]) void fetchChildren(parentPath);
-        return curr;
-      });
+      if (!nodesRef.current[parentPath]) void fetchChildren(parentPath);
     },
     [rootPath, fetchChildren, addWatch],
   );

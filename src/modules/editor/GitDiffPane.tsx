@@ -4,7 +4,10 @@ import { Spinner } from "@/components/ui/spinner";
 import { unifiedMergeView } from "@codemirror/merge";
 import { EditorState, type Extension } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
-import CodeMirror, { type ReactCodeMirrorRef } from "@uiw/react-codemirror";
+import CodeMirror, {
+  type BasicSetupOptions,
+  type ReactCodeMirrorRef,
+} from "@uiw/react-codemirror";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   commitDiffKey,
@@ -20,6 +23,16 @@ import {
 } from "./lib/extensions";
 import { resolveLanguage, resolveLanguageSync } from "./lib/languageResolver";
 import { useEditorThemeExt } from "./lib/useEditorThemeExt";
+
+// Stable identity: @uiw/react-codemirror reconfigures every extension when
+// this prop changes, and an inline object changes on every render.
+const BASIC_SETUP: BasicSetupOptions = {
+  lineNumbers: true,
+  foldGutter: true,
+  highlightActiveLine: false,
+  highlightActiveLineGutter: false,
+  searchKeymap: true,
+};
 
 type WorkingSource = {
   kind: "working";
@@ -317,13 +330,7 @@ export function GitDiffPane({ source, chipLabel, active }: Props) {
             editable={false}
             height="100%"
             className="h-full"
-            basicSetup={{
-              lineNumbers: true,
-              foldGutter: true,
-              highlightActiveLine: false,
-              highlightActiveLineGutter: false,
-              searchKeymap: true,
-            }}
+            basicSetup={BASIC_SETUP}
           />
         )}
       </div>

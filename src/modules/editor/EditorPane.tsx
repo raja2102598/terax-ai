@@ -17,7 +17,10 @@ import { Prec } from "@codemirror/state";
 import { EditorView, keymap } from "@codemirror/view";
 import { vim } from "@replit/codemirror-vim";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import CodeMirror, { type ReactCodeMirrorRef } from "@uiw/react-codemirror";
+import CodeMirror, {
+  type BasicSetupOptions,
+  type ReactCodeMirrorRef,
+} from "@uiw/react-codemirror";
 import {
   forwardRef,
   memo,
@@ -58,6 +61,20 @@ import { type LanguageResult, resolveLanguage } from "./lib/languageResolver";
 import { FORCE_READ_LIMIT, useDocument } from "./lib/useDocument";
 import { useEditorThemeExt } from "./lib/useEditorThemeExt";
 import { initVimGlobals, vimHandlersExtension } from "./lib/vim";
+
+// Stable identity: @uiw/react-codemirror reconfigures every extension when
+// this prop changes, and an inline object changes on every render.
+const BASIC_SETUP: BasicSetupOptions = {
+  lineNumbers: true,
+  highlightActiveLineGutter: true,
+  foldGutter: true,
+  bracketMatching: true,
+  closeBrackets: true,
+  autocompletion: true,
+  highlightActiveLine: true,
+  highlightSelectionMatches: true,
+  searchKeymap: true,
+};
 
 initVimGlobals();
 
@@ -657,17 +674,7 @@ export const EditorPane = memo(
           extensions={extensions}
           height="100%"
           className="terax-code-editor flex-1 min-h-0 overflow-hidden"
-          basicSetup={{
-            lineNumbers: true,
-            highlightActiveLineGutter: true,
-            foldGutter: true,
-            bracketMatching: true,
-            closeBrackets: true,
-            autocompletion: true,
-            highlightActiveLine: true,
-            highlightSelectionMatches: true,
-            searchKeymap: true,
-          }}
+          basicSetup={BASIC_SETUP}
         />
       </div>
     );

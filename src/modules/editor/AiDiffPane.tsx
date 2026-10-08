@@ -6,7 +6,10 @@ import { EditorState, type Extension } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { Cancel01Icon, Tick02Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import CodeMirror, { type ReactCodeMirrorRef } from "@uiw/react-codemirror";
+import CodeMirror, {
+  type BasicSetupOptions,
+  type ReactCodeMirrorRef,
+} from "@uiw/react-codemirror";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   buildSharedExtensions,
@@ -15,6 +18,16 @@ import {
 } from "./lib/extensions";
 import { resolveLanguage, resolveLanguageSync } from "./lib/languageResolver";
 import { useEditorThemeExt } from "./lib/useEditorThemeExt";
+
+// Stable identity: @uiw/react-codemirror reconfigures every extension when
+// this prop changes, and an inline object changes on every render.
+const BASIC_SETUP: BasicSetupOptions = {
+  lineNumbers: true,
+  foldGutter: true,
+  highlightActiveLine: false,
+  highlightActiveLineGutter: false,
+  searchKeymap: true,
+};
 
 type Props = {
   path: string;
@@ -200,13 +213,7 @@ export function AiDiffPane({
           editable={false}
           height="100%"
           className="h-full"
-          basicSetup={{
-            lineNumbers: true,
-            foldGutter: true,
-            highlightActiveLine: false,
-            highlightActiveLineGutter: false,
-            searchKeymap: true,
-          }}
+          basicSetup={BASIC_SETUP}
         />
       </div>
     </div>

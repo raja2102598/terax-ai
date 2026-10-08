@@ -170,8 +170,22 @@ export function useDocument({ path, onDirtyChange }: Options) {
   // read resolves, since typing can start while it is in flight.
   const reload = useCallback((): boolean => {
     if (dirtyRef.current) return false;
-    void readFromDisk(forceRef.current)
+    const known = diskMtimeRef.current;
+    // The watcher echoes our own saves; a stat is far cheaper than a full
+    // re-read and the mtime is the same signal saveNow trusts for conflicts.
+    const unchanged =
+      known === null
+        ? Promise.resolve(false)
+        : invoke<FileStat>("fs_stat", {
+            path,
+            workspace: currentWorkspaceEnv(),
+          })
+            .then((stat) => stat.mtime === known)
+            .catch(() => false);
+    void unchanged
+      .then((same) => (same ? null : readFromDisk(forceRef.current)))
       .then((res) => {
+        if (!res) return;
         if (!dirtyRef.current) adoptRead(res, true);
       })
       // Transient failures (e.g. ENOENT mid atomic-rename) must not replace
