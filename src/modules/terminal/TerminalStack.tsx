@@ -1,5 +1,5 @@
 import type { Tab } from "@/modules/tabs";
-import type { SearchAddon } from "@xterm/addon-search";
+import type { TerminalSearchController } from "@/modules/terminal/search/TerminalSearchController";
 import { useEffect, useMemo, useRef } from "react";
 import { selectLiveTerminals } from "./lib/liveTerminals";
 import { leafIds } from "./lib/panes";
@@ -11,7 +11,7 @@ type Props = {
   activeId: number;
   /** Register/unregister handle by leaf id (not tab id). */
   registerHandle: (leafId: number, handle: TerminalPaneHandle | null) => void;
-  onSearchReady: (leafId: number, addon: SearchAddon) => void;
+  onSearchReady: (leafId: number, addon: TerminalSearchController) => void;
   onCwd: (leafId: number, cwd: string) => void;
   onExit: (leafId: number, code: number) => void;
   onFocusLeaf: (tabId: number, leafId: number) => void;
@@ -19,7 +19,7 @@ type Props = {
 
 type Bundle = {
   setRef: (h: TerminalPaneHandle | null) => void;
-  onSearchReady: (leafId: number, addon: SearchAddon) => void;
+  onSearchReady: (leafId: number, addon: TerminalSearchController) => void;
   onCwd: (leafId: number, cwd: string) => void;
   onExit: (leafId: number, code: number) => void;
 };
@@ -77,7 +77,17 @@ export function TerminalStack({
   }, [terminals]);
 
   return (
-    <div className="relative h-full w-full">
+    <div data-terminal-stack="" className="relative h-full w-full">
+      {/*
+        The one canvas every WebGPU pane of this window draws into (WebGpuWindowCanvas). It is
+        exempt from the app zoom like the panes, so its CSS pixels are real pixels, and it clips
+        the canvas to the area. Tabs and panes above it are transparent where it shows through.
+      */}
+      <div
+        data-terminal-area=""
+        aria-hidden="true"
+        className="zoom-exempt pointer-events-none absolute inset-0 overflow-hidden"
+      />
       {terminals.map((t) => {
         const tabVisible = t.id === activeId;
         return (

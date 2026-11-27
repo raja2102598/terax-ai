@@ -1,46 +1,23 @@
-// WebKitGTK can't read external copies, so the native plugin is Linux-only and
-// lazy-loaded to keep it out of the mac/win bundle.
-const IS_LINUX =
-  typeof navigator !== "undefined" &&
-  /Linux/.test(navigator.userAgent) &&
-  !/Android/.test(navigator.userAgent);
-
-function webClipboard(): Clipboard | null {
-  if (typeof navigator === "undefined") return null;
-  return navigator.clipboard ?? null;
-}
+import { isTauri } from "@tauri-apps/api/core";
 
 export async function readTerminalClipboard(): Promise<string> {
-  if (IS_LINUX) {
-    try {
+  try {
+    if (isTauri()) {
       const { readText } = await import("@tauri-apps/plugin-clipboard-manager");
       return await readText();
-    } catch {}
-  }
-  try {
-    return (await webClipboard()?.readText()) ?? "";
+    }
+    return (await navigator.clipboard?.readText()) ?? "";
   } catch {
     return "";
   }
 }
 
-/** Returns true only when text was accepted by a clipboard transport. */
-export async function writeTerminalClipboard(text: string): Promise<boolean> {
-  if (IS_LINUX) {
-    try {
-      const { writeText } = await import(
-        "@tauri-apps/plugin-clipboard-manager"
-      );
-      await writeText(text);
-      return true;
-    } catch {}
+export async function writeTerminalClipboard(text: string): Promise<void> {
+  if (isTauri()) {
+    const { writeText } = await import("@tauri-apps/plugin-clipboard-manager");
+    await writeText(text);
+    return;
   }
-  try {
-    const clipboard = webClipboard();
-    if (!clipboard) return false;
-    await clipboard.writeText(text);
-    return true;
-  } catch {
-    return false;
-  }
+  if (!navigator.clipboard) throw new Error("Clipboard is unavailable");
+  await navigator.clipboard.writeText(text);
 }

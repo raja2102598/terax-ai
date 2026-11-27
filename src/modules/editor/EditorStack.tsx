@@ -1,13 +1,12 @@
 import { cn, isMarkdownPath } from "@/lib/utils";
 import { MarkdownViewToggle } from "@/modules/markdown";
+import { useWindowInactive } from "@/modules/theme/WindowActivityBridge";
 import type { EditorTab, Tab } from "@/modules/tabs";
 import { useEffect, useRef } from "react";
 import { EditorPane, type EditorPaneHandle } from "./EditorPane";
-import { MediaPane } from "./MediaPane";
 import { CsvPane } from "./CsvPane";
 import { ParquetPane } from "./ParquetPane";
 
-const isImage = (path: string) => /\.(png|jpe?g|gif|webp|svg)$/i.test(path);
 const isParquet = (path: string) => /\.parquet$/i.test(path);
 const isCsv = (path: string) => /\.csv$/i.test(path);
 
@@ -95,6 +94,8 @@ export function EditorStack({
     }
   }, [editors]);
 
+  const windowInactive = useWindowInactive();
+
   if (editors.length === 0) return null;
   return (
     <div className="relative h-full w-full">
@@ -110,9 +111,7 @@ export function EditorStack({
             aria-hidden={!visible}
           >
             <div className="relative h-full overflow-hidden bg-background">
-              {isImage(t.path) ? (
-                <MediaPane path={t.path} />
-              ) : isParquet(t.path) ? (
+              {isParquet(t.path) ? (
                 <ParquetPane path={t.path} />
               ) : isCsv(t.path) ? (
                 <CsvPane path={t.path} />
@@ -132,6 +131,7 @@ export function EditorStack({
                     overrideLanguage={t.overrideLanguage}
                     onDirtyChange={getDirtyCallback(t.id)}
                     onClose={getCloseCallback(t.id)}
+                    mediaActive={visible && !windowInactive}
                   />
                 </>
               )}

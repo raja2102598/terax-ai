@@ -3,7 +3,7 @@ import type {
   GitChangedFile,
   GitRepoInfo,
   GitStatusSnapshot,
-} from "@/modules/ai/lib/native";
+} from "@/modules/git";
 import {
   keepIfUnchanged,
   sameGitRepoInfo,

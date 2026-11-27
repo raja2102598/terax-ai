@@ -2,7 +2,7 @@ import type {
   GitChangedFile,
   GitRepoInfo,
   GitStatusSnapshot,
-} from "@/modules/ai/lib/native";
+} from "@/modules/git";
 
 export function sameGitRepoInfo(
   a: GitRepoInfo | null,

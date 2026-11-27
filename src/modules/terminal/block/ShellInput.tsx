@@ -1,8 +1,9 @@
 import { resolveFontFamily } from "@/lib/fonts";
-import { fmtShortcut, MOD_KEY } from "@/lib/platform";
 import { cn } from "@/lib/utils";
+import { useShortcutHint } from "@/modules/shortcuts";
 import { useTheme } from "@/modules/theme";
 import { useEffect, useRef } from "react";
+import { runScopeHandlers } from "@codemirror/view";
 import {
   clearLeafBlockSelection,
   getLeafDraft,
@@ -10,7 +11,9 @@ import {
   setLeafDraft,
   setLeafInputActivity,
   setLeafInputFocus,
-} from "../lib/useTerminalSession";
+  setLeafInputKeyDown,
+  setLeafInputPaste,
+} from "../lib/terminalSessionApi";
 import { useTerminalFont } from "../lib/useTerminalFont";
 import {
   historyCommands,
@@ -19,7 +22,11 @@ import {
   historySuggest,
 } from "./lib/history";
 import type { BlockMode } from "./lib/modeMachine";
-import { createShellEditor, type ShellEditorHandle } from "./lib/shellEditor";
+import {
+  createShellEditor,
+  type ShellEditorHandle,
+  shellPlaceholder,
+} from "./lib/shellEditor";
 
 type Props = {
   /** Active leaf the bar is driving; the editor retargets to it. */
@@ -69,6 +76,9 @@ export default function ShellInput({
   const fontFamily = resolveFontFamily(fontFamilyPref);
   const fontRef = useRef({ fontFamily, fontSize, fontWeight });
   fontRef.current = { fontFamily, fontSize, fontWeight };
+  const placeholder = shellPlaceholder(useShortcutHint("terminal.toggleInput"));
+  const placeholderRef = useRef(placeholder);
+  placeholderRef.current = placeholder;
 
   useEffect(() => {
     const host = hostRef.current;
@@ -78,7 +88,7 @@ export default function ShellInput({
       fontFamily: fontRef.current.fontFamily,
       fontSize: fontRef.current.fontSize,
       fontWeight: fontRef.current.fontWeight,
-      placeholderText: `Run a command  -  ↑ history  ${fmtShortcut(MOD_KEY, "U")} switch to AI`,
+      placeholderText: placeholderRef.current,
       commandNames: () => commandsRef.current,
       getCwd: () => cbRef.current.getCwd(),
       onChange: (text) =>
@@ -89,7 +99,7 @@ export default function ShellInput({
         historyRecord(text);
         const first = text.trim().split(/\s+/)[0];
         if (first && !commandsRef.current.includes(first)) {
-          commandsRef.current = [first, ...commandsRef.current];
+          commandsRef.current = [first, ...commandsRef.current.slice(0, 1999)];
         }
         cbRef.current.onSubmit(text);
       },
@@ -97,18 +107,40 @@ export default function ShellInput({
       onEscape: () => clearLeafBlockSelection(leafIdRef.current),
     });
     handleRef.current = handle;
-    requestAnimationFrame(() => handleRef.current?.focus());
+    const frame = requestAnimationFrame(() => {
+      if (focusableRef.current) handleRef.current?.focus();
+    });
     return () => {
+      cancelAnimationFrame(frame);
+      const value = handle.getValue();
+      setLeafDraft(leafIdRef.current, value);
+      setLeafInputActivity(leafIdRef.current, value.length > 0);
       handle.destroy();
       handleRef.current = null;
     };
   }, []);
+
+  useEffect(() => {
+    handleRef.current?.setPlaceholder(placeholder);
+  }, [placeholder]);
 
   // Retarget the single editor to the active leaf: register its focus callback
   // and swap drafts so each leaf keeps its own unsent command. New or switched
   // tabs land with the cursor already in the input.
   useEffect(() => {
     setLeafInputFocus(leafId, () => handleRef.current?.focus());
+    setLeafInputKeyDown(leafId, (event) => {
+      const view = handleRef.current?.view;
+      if (!view) return false;
+      view.focus();
+      return runScopeHandlers(view, event, "editor");
+    });
+    setLeafInputPaste(leafId, (text) => {
+      const view = handleRef.current?.view;
+      if (!view) return;
+      view.dispatch(view.state.replaceSelection(text));
+      view.focus();
+    });
     handleRef.current?.setValue(getLeafDraft(leafId));
     requestAnimationFrame(() => {
       if (focusableRef.current && leafIdRef.current === leafId) {
@@ -116,10 +148,12 @@ export default function ShellInput({
       }
     });
     return () => {
-      const value = handleRef.current?.getValue() ?? "";
+      const value = handleRef.current?.getValue() ?? getLeafDraft(leafId);
       setLeafDraft(leafId, value);
       setLeafInputActivity(leafId, value.length > 0);
       setLeafInputFocus(leafId, null);
+      setLeafInputKeyDown(leafId, null);
+      setLeafInputPaste(leafId, null);
     };
   }, [leafId]);
 
@@ -133,7 +167,6 @@ export default function ShellInput({
     const handle = handleRef.current;
     if (!handle) return;
     handle.setEditable(atPrompt);
-    if (atPrompt) handle.focus();
   }, [atPrompt]);
 
   useEffect(() => {
@@ -141,7 +174,7 @@ export default function ShellInput({
   }, [focused, atPrompt]);
 
   // The editor holds focus at the prompt, so a Cmd+C over a grid selection lands
-  // here, not on the xterm. Copy the grid selection unless the editor has its own.
+  // in the shell editor. Copy the grid selection unless the editor has its own.
   const onCopyCapture = (e: React.ClipboardEvent) => {
     const view = handleRef.current?.view;
     if (view && !view.state.selection.main.empty) return;

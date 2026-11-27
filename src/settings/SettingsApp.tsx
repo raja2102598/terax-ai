@@ -1,14 +1,15 @@
+import { Toaster } from "@/components/ui/sonner";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { WindowControls } from "@/components/WindowControls";
 import { IS_MAC, USE_CUSTOM_WINDOW_CONTROLS } from "@/lib/platform";
 import type { SettingsTab } from "@/modules/settings/openSettingsWindow";
 import { usePreferencesStore } from "@/modules/settings/preferences";
+import { WindowActivityBridge } from "@/modules/theme";
 import {
   AiScanIcon,
   InformationCircleIcon,
   KeyboardIcon,
   PaintBoardIcon,
-  Search01Icon,
   Settings01Icon,
   SourceCodeIcon,
   UserMultiple02Icon,
@@ -22,7 +23,6 @@ import { EditorSection } from "./sections/EditorSection";
 import { GeneralSection } from "./sections/GeneralSection";
 import { ModelsSection } from "./sections/ModelsSection";
 import { ShortcutsSection } from "./sections/ShortcutsSection";
-import { SuggestionsSection } from "./sections/SuggestionsSection";
 import { ThemesSection } from "./sections/ThemesSection";
 
 const TABS: {
@@ -55,12 +55,6 @@ const TABS: {
     icon: KeyboardIcon,
     component: ShortcutsSection,
   },
-  {
-    id: "suggestions",
-    label: "Suggestions",
-    icon: Search01Icon,
-    component: SuggestionsSection,
-  },
   { id: "models", label: "Models", icon: AiScanIcon, component: ModelsSection },
   {
     id: "agents",
@@ -81,7 +75,6 @@ const VALID_TABS: SettingsTab[] = [
   "editor",
   "themes",
   "shortcuts",
-  "suggestions",
   "models",
   "agents",
   "about",
@@ -155,6 +148,8 @@ export function SettingsApp() {
         </Tabs>
         {USE_CUSTOM_WINDOW_CONTROLS && <WindowControls closeOnly />}
       </header>
+      <WindowActivityBridge />
+      <Toaster position="bottom-right" />
 
       <main className="min-h-0 flex-1 overflow-y-auto px-8 pt-6 pb-7 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
         <div className="mx-auto w-full max-w-160">

@@ -6,6 +6,7 @@ use std::time::UNIX_EPOCH;
 use ignore::WalkBuilder;
 use serde::Serialize;
 
+use super::blocking;
 use crate::modules::workspace::{resolve_path, WorkspaceEnv};
 
 #[derive(Serialize)]
@@ -130,8 +131,17 @@ fn natural_cmp(a: &str, b: &str) -> Ordering {
 /// (files and dirs) are hidden unless `show_hidden` is set. `git_decorations`
 /// opts into the per-entry `gitignored` flag; off by default so non-explorer
 /// callers pay nothing.
-#[tauri::command(async)]
-pub fn fs_read_dir(
+#[tauri::command]
+pub async fn fs_read_dir(
+    path: String,
+    show_hidden: bool,
+    git_decorations: Option<bool>,
+    workspace: Option<WorkspaceEnv>,
+) -> Result<Vec<DirEntry>, String> {
+    blocking(move || read_dir_entries(path, show_hidden, git_decorations, workspace)).await
+}
+
+pub fn read_dir_entries(
     path: String,
     show_hidden: bool,
     git_decorations: Option<bool>,
@@ -217,8 +227,16 @@ pub fn fs_read_dir(
 ///
 /// Symlinks to directories are included (matches shell `cd` semantics).
 /// Hidden entries are filtered by dot-prefix only.
-#[tauri::command(async)]
-pub fn list_subdirs(
+#[tauri::command]
+pub async fn list_subdirs(
+    path: String,
+    show_hidden: bool,
+    workspace: Option<WorkspaceEnv>,
+) -> Result<Vec<String>, String> {
+    blocking(move || subdirs(path, show_hidden, workspace)).await
+}
+
+pub fn subdirs(
     path: String,
     show_hidden: bool,
     workspace: Option<WorkspaceEnv>,

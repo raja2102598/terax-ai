@@ -4,6 +4,12 @@ This guide elaborates on `TERAX.md`. If anything here conflicts with `TERAX.md`,
 
 ## Session model
 
+Block sessions keep direct terminal input until OSC 133 confirms prompt input.
+Bare shells therefore remain usable. Bash before 4.4 lacks PS0 and emits
+`OSC 133;B;terax_blocks=0`, retaining its native prompt instead of activating
+Terax's shared command bar. Shell command labels stay bounded; block rerun uses
+the complete command submitted through Terax, never a truncated OSC label.
+
 A terminal tab maps to one PTY session. Sessions live in `PtyState` (`src-tauri/src/modules/pty/mod.rs:20`):
 
 ```rust
@@ -15,17 +21,43 @@ pub struct PtyState {
 
 IDs start at 1 and monotonically increase; they are never reused so the frontend can treat `0` as unset.
 
-`pty_open` (`mod.rs:44`) spawns a session on a blocking thread, inserts it into the map, and returns the id. Output streams through a `Channel<Response>`; exit codes stream through a separate `Channel<i32>`. `pty_write` (`mod.rs:100`) accepts raw bytes with an `x-pty-id` header to avoid JSON serialization on every keystroke.
+`pty_open` spawns a session on a blocking thread, registers it with the PTY hub under the calling webview's label, inserts it into the map, and returns the id. Output and exit codes travel over the multiplexed `terax-pty` stream (see `pty-transport-v2.md`), not per-PTY channels. `pty_write` accepts raw bytes with an `x-pty-id` header and queues them to the session's writer thread, so a full input pipe cannot block other IPC and write order and I/O errors are preserved.
 
-## Reader / flusher / waiter threads
+## Reader / writer / waiter threads, and the hub
 
-`session::spawn` (`session.rs:102`) starts three threads per session:
+`session::spawn_with` starts three small-stack threads per session:
 
-1. **Reader** - reads bytes from the PTY master, runs the DA filter and agent detector, and pushes filtered bytes into a pending buffer.
-2. **Flusher** - coalesces output and sends it to the frontend over the data channel.
-3. **Waiter** - waits for the child process to exit, flushes the tail, and emits the exit code.
+1. **Reader** - reads bytes from the PTY master, runs the DA filter and agent detector (both `memchr`-driven), and pushes filtered bytes into the session's `OutputQueue`. It checks an atomic `closed` flag, not the queue mutex.
+2. **Writer** - owns the PTY input. `pty_write` and terminal replies (DA/CPR) share one bounded queue, so input stays ordered and no task is spawned per keystroke.
+3. **Waiter** - waits for the child process to exit, joins the reader, hands the exit status to the hub, and waits until the exit frame was delivered.
 
-The pending buffer is capped at 4 MiB; on overflow it is discarded and replaced with an SGR-reset notice so xterm state is not corrupted by a sliced CSI sequence.
+Delivery belongs to one process-wide **hub thread** (`pty/hub.rs`), not a flusher per PTY. It holds the webview's outstanding `poll` and answers when a terminal is due for its presentation class; see `pty-transport-v2.md` for the wire format, classes and credit.
+
+Output delivery is lossless and credit-based. The frontend acknowledges a
+chunk only after Ghostty has synchronously parsed it.
+Native pending plus in-flight data is capped at 2 MiB per terminal, with at most
+1 MiB (128 chunks) in flight. When either limit is reached, the reader stops draining the
+PTY and lets the operating system apply backpressure. No terminal bytes or
+partial escape sequences are discarded during normal delivery or acknowledgment retries.
+
+Acknowledgements are cumulative parsed-byte offsets, not credit deltas, and
+ride on the next `poll`. Rust validates them against delivered chunk boundaries.
+Duplicate and stale counts do nothing; an invalid boundary fails that terminal.
+The frontend retains unconfirmed progress and resends it after a failed request
+with capped backoff. A stuck parser is visible after five seconds. A parser error
+never returns credit for unconsumed bytes.
+
+Reader completion and queue wakeups share the same mutex, preventing missed
+EOF notifications. Neither child exit nor EOF bypasses the byte or message
+limits. The exit frame is sent only after the final parser acknowledgment;
+registration checks completed draining rather than mere child exit.
+
+On Windows the waiter closes the ConPTY master on its own thread while the
+reader continues through EOF, including the final frame emitted during close.
+Explicit user close releases queue waiters and drains unwanted pipe bytes until
+EOF. This follows the [ClosePseudoConsole contract](https://learn.microsoft.com/en-us/windows/console/closepseudoconsole)
+and avoids the previous 50 ms final-output heuristic. Windows runtime testing
+remains a release gate.
 
 ## Shell bootstrapping
 
@@ -39,7 +71,7 @@ Integration scripts live in `src-tauri/src/modules/pty/scripts/`:
 - `bashrc.bash` for bash
 - `init.fish` for fish, installed to `~/.config/fish/conf.d/terax.fish`
 
-Zsh is launched with `ZDOTDIR` pointing at a temp directory that sources our scripts and then the user's real configs. Bash uses `--rcfile` with a wrapper that sources the user's `~/.bashrc` after Terax's. Fish uses `conf.d` so no user file is replaced.
+Zsh is launched with `ZDOTDIR` pointing at a temp directory that sources our scripts and then the user's real configs, each with `ZDOTDIR` switched to the user's own directory while it runs. `ZDOTDIR` is the user's own at the prompt, in hooks and while ordinary commands run; only a command line that starts a zsh (`exec zsh`, nested `zsh`, `env X=1 zsh`, `$SHELL`) gets the integration directory exported for that command, so that shell is integrated again. The prompt end marker is also emitted from `zle-line-init`, which runs after the line editor drew whatever powerlevel10k or starship built. Bash uses `--rcfile` with a wrapper that sources the user's `~/.bashrc` after Terax's. Fish uses `conf.d` so no user file is replaced.
 
 All integrated shells emit **OSC 7** (cwd) and **OSC 133 A/B/C/D** (prompt boundaries and exit code) so Terax can track cwd and detect command boundaries without parsing the user's prompt.
 
@@ -49,7 +81,7 @@ On Windows the shell priority is:
 
 1. `pwsh.exe` (PowerShell 7+)
 2. `powershell.exe` (Windows PowerShell 5.1)
-3. `cmd.exe` (no integration)
+3. `cmd.exe` (cwd only, through `PROMPT`)
 
 PowerShell loads `profile.ps1` via:
 
@@ -67,7 +99,9 @@ Fish 4.0 writes its own OSC 133 prompt markers. To avoid doubling, Terax sets `f
 
 ### `CONPTY_LIFECYCLE_LOCK`
 
-`openpty + spawn_command` and the corresponding close are serialized by a static mutex in `session.rs:71`. Concurrent ConPTY lifecycle calls corrupt the new console so its shell never pumps output.
+`openpty + spawn_command` and the corresponding close are serialized by a static mutex in `session.rs`. Concurrent ConPTY lifecycle calls corrupt the new console so its shell never pumps output.
+
+`ClosePseudoConsole` blocks until the reader has taken everything conhost still holds, and the reader can be waiting for output credit the frontend has not granted yet. Holding the lock through that wait would stall every other `pty_open` for up to the 30 s drain deadline. `close_pseudoconsole` therefore lets the reader overdraft its queue by 1 MiB first, outside the lock, and only then takes the lock around the close itself.
 
 ### Job Object
 
@@ -81,6 +115,8 @@ On macOS and Linux, `Drop for Session` calls `killer.kill()`. Dev `Ctrl-C` of `c
 
 PowerShell / PSReadLine sends a cursor-position query (`ESC[6n`) at startup and blocks until it gets an answer. The `DaFilter` (`da_filter.rs`) intercepts that query and replies on the PTY input so the shell does not hang.
 
+The same filter answers colour queries (`OSC 4;n;?`, `OSC 10/11/12;?`, `CSI ? 996 n`) from the theme the page last pushed with `pty_set_colors` (sent at `pty_open` and whenever the theme or light/dark mode changes). Programs such as agent CLIs and pagers give up on a colour query after a short fixed time, and a reply that arrives later is echoed by the tty as visible text, so the answer must not wait for the webview. Replies use the terminator of the query (BEL or ST) and 16-bit channels; a `CSI c` right after an answered colour query is answered in the same pass so it cannot overtake the colour reply. A program that enabled `CSI ? 2031 h` is told when the scheme flips, until it resets the terminal (`ESC c`, `CSI ! p`) or the shell starts its next prompt (`OSC 133;A`). Sets and resets a program makes are noted (not answered) and leave later queries for that colour to the webview model, which holds the real value. Queries inside strings, including tmux `DCS` passthrough, are never answered.
+
 ### Agent detection
 
 The reader thread runs an `AgentDetector` (`agent_detect.rs`) over the byte stream. It is armed by `OSC 133;C;<cmd>` or by a self-armed `OSC 777` marker and emits `terax:agent-signal` transitions (`started`, `working`, `attention`, `finished`, `exited`). Detection is driven only by OSC sequences, never by raw output, so a repainting TUI never flaps.
@@ -92,6 +128,7 @@ Terminal input sends `\r` (CR), not `\n` (LF). PowerShell on Windows requires CR
 ## Invariants
 
 - Do not remove `CONPTY_LIFECYCLE_LOCK` without verifying first-tab stability under fast tab spam.
+- Never hold `CONPTY_LIFECYCLE_LOCK` across a wait that depends on the frontend (credit, acknowledgements).
 - Do not disable the Job Object without a replacement orphan guard on Windows.
 - Keep platform-specific shell logic in the matching `#[cfg(unix)]` or `#[cfg(windows)]` arm of `shell_init.rs`.
 - cwd passed to ConPTY must use backslashes; OSC 7 cwd arriving at the frontend is forward-slash canonical.
@@ -101,4 +138,4 @@ Terminal input sends `\r` (CR), not `\n` (LF). PowerShell on Windows requires CR
 - [`TERAX.md`](../../TERAX.md) - the architecture source of truth
 - [`docs/README.md`](../README.md) - index of contributor guides
 - [Two-process model](two-process-model.md) - IPC boundary and command catalog
-- [Terminal renderer pool](terminal-renderer-pool.md) - slot pooling and the DormantRing
+- [Terminal renderer pool](terminal-renderer-pool.md) - model ownership and presentation pooling

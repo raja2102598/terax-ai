@@ -5,17 +5,16 @@ use crate::modules::git::errors::{GitError, Result};
 use crate::modules::git::parser::parse_porcelain_v2;
 use crate::modules::git::process::{
     ensure_git_available, ensure_success, git_show_text, git_stdout_line_opt, git_stdout_lines,
-    read_text_file, run_git,
+    read_text_file, run_git, run_git_capped,
 };
 use crate::modules::git::types::{
     DiscardEntry, GitBranchEntry, GitBranchListResult, GitCommitFileChange, GitCommitResult,
-    GitDiffContentResult, GitDiffResult, GitLogEntry, GitOutput, GitPanelSnapshot,
-    GitPushResult, GitRepoInfo, GitStatusSnapshot, TextSource, DEFAULT_TIMEOUT_SECS,
-    NETWORK_TIMEOUT_SECS,
+    GitDiffContentResult, GitDiffResult, GitLogEntry, GitOutput, GitPanelSnapshot, GitPushResult,
+    GitRepoInfo, GitStatusSnapshot, TextSource, DEFAULT_TIMEOUT_SECS, NETWORK_TIMEOUT_SECS,
 };
+use crate::modules::git::untracked;
 use crate::modules::git::utils::{
-    authorized_repo_root, canonical_dir, resolve_within_repo, split_upstream,
-    ResolvedGitDirectory,
+    authorized_repo_root, canonical_dir, resolve_within_repo, split_upstream, ResolvedGitDirectory,
 };
 use crate::modules::workspace::{WorkspaceEnv, WorkspaceRegistry};
 
@@ -45,7 +44,9 @@ fn resolve_repo_in_authorized(
         return Ok(None);
     };
     let canonical_root = canonical_dir(registry, &root_line, &cwd.workspace)?;
-    let _ = registry.authorize(&canonical_root.local_path);
+    if !registry.is_authorized(&canonical_root.local_path) {
+        return Err(GitError::PathOutsideWorkspace(canonical_root.local_path));
+    }
 
     let head = match git_stdout_lines(
         &canonical_root.workspace,
@@ -103,7 +104,9 @@ pub fn panel_snapshot(
         });
     };
     let canonical_root = canonical_dir(registry, &root_line, &cwd.workspace)?;
-    let _ = registry.authorize(&canonical_root.local_path);
+    if !registry.is_authorized(&canonical_root.local_path) {
+        return Err(GitError::PathOutsideWorkspace(canonical_root.local_path));
+    }
 
     let status = status_inner(&canonical_root)?;
     let repo = GitRepoInfo {
@@ -137,7 +140,7 @@ fn status_inner(repo_root: &ResolvedGitDirectory) -> Result<GitStatusSnapshot> {
             "--porcelain=v2",
             "--branch",
             "-z",
-            "--untracked-files=all",
+            "--untracked-files=normal",
         ],
         DEFAULT_TIMEOUT_SECS,
     )?;
@@ -145,6 +148,9 @@ fn status_inner(repo_root: &ResolvedGitDirectory) -> Result<GitStatusSnapshot> {
 
     let stdout = std::str::from_utf8(&output.stdout).unwrap_or("");
     let parsed = parse_porcelain_v2(stdout);
+    let files = untracked::expand_untracked_dirs(parsed.files, |dir, budget| {
+        list_untracked_in(repo_root, dir, budget)
+    });
 
     Ok(GitStatusSnapshot {
         repo_root: repo_root.git_path.clone(),
@@ -154,8 +160,42 @@ fn status_inner(repo_root: &ResolvedGitDirectory) -> Result<GitStatusSnapshot> {
         behind: parsed.behind,
         is_detached: parsed.is_detached,
         truncated: output.truncated,
-        changed_files: parsed.files,
+        changed_files: files,
     })
+}
+
+/// Files git reports as untracked (and not ignored) under `dir`, or `None` when
+/// there are more than `budget` or the listing fails. The walk is abandoned as
+/// soon as the output exceeds what `budget` entries could need.
+fn list_untracked_in(
+    repo_root: &ResolvedGitDirectory,
+    dir: &str,
+    budget: usize,
+) -> Option<Vec<String>> {
+    let output = run_git_capped(
+        &repo_root.workspace,
+        Some(&repo_root.git_path),
+        [
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "-z",
+            "--full-name",
+            "--",
+            dir,
+        ],
+        DEFAULT_TIMEOUT_SECS,
+        untracked::LISTING_CAP_BYTES,
+    )
+    .ok()?;
+    if output.truncated || output.timed_out {
+        return None;
+    }
+    // A listing that was cut short by the cap above reports exit failure.
+    if output.exit_code != Some(0) {
+        return None;
+    }
+    untracked::parse_listing(&output.stdout, budget)
 }
 
 pub fn diff(
@@ -315,12 +355,7 @@ pub fn unstage(
     if !looks_like_no_head(&output) {
         return ensure_success(&output, "git reset failed");
     }
-    let mut rm_args: Vec<OsString> = vec![
-        "rm".into(),
-        "--cached".into(),
-        "-r".into(),
-        "--".into(),
-    ];
+    let mut rm_args: Vec<OsString> = vec!["rm".into(), "--cached".into(), "-r".into(), "--".into()];
     for p in &resolved {
         rm_args.push(p.clone().into());
     }
@@ -439,6 +474,7 @@ pub fn commit(
 pub fn push(
     registry: &WorkspaceRegistry,
     repo_root: &str,
+    set_upstream: bool,
     workspace: &WorkspaceEnv,
 ) -> Result<GitPushResult> {
     let repo_root = authorized_repo_root(registry, repo_root, workspace)?;
@@ -450,7 +486,10 @@ pub fn push(
         ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
     )?;
     if upstream.is_none() {
-        return Err(GitError::NoUpstream);
+        if !set_upstream {
+            return Err(GitError::NoUpstream);
+        }
+        return push_set_upstream(&repo_root);
     }
 
     let output = run_git(
@@ -468,6 +507,50 @@ pub fn push(
         branch,
         pushed: true,
     })
+}
+
+/// First push of a branch that has no upstream: `git push -u <remote> <branch>`
+/// to the remote git is configured to push the branch to (`pushRemote`, then
+/// `remote.pushDefault`), else `origin`, else the only remote.
+fn push_set_upstream(repo_root: &ResolvedGitDirectory) -> Result<GitPushResult> {
+    let branch = crate::modules::git::branch::current_branch(repo_root)?
+        .ok_or_else(|| GitError::command("git push", "HEAD is detached; check out a branch first"))?;
+    let remotes = crate::modules::git::branch::list_remotes(repo_root)?;
+    let remote = crate::modules::git::branch::push_remote_for(repo_root, &branch, &remotes)?
+        .ok_or_else(|| {
+            GitError::command(
+                "git push",
+                if remotes.is_empty() {
+                    "no remote is configured"
+                } else {
+                    "no usable push remote: check branch.<name>.pushRemote and remote.pushDefault, or push once from the terminal"
+                },
+            )
+        })?;
+    crate::modules::git::plumbing::check_branch_name(repo_root, &branch)?;
+    let output = run_git(
+        &repo_root.workspace,
+        Some(&repo_root.git_path),
+        set_upstream_args(&remote, &branch),
+        NETWORK_TIMEOUT_SECS,
+    )?;
+    ensure_success(&output, "git push failed")?;
+    Ok(GitPushResult {
+        remote: Some(remote),
+        branch: Some(branch),
+        pushed: true,
+    })
+}
+
+/// `--` ends option parsing, so neither name can ever be read as a flag, and the
+/// branch is a fully qualified refspec: a tag of the same name would otherwise
+/// make a short `<branch>` ambiguous and the push fail.
+fn set_upstream_args(remote: &str, branch: &str) -> Vec<String> {
+    let refspec = format!("refs/heads/{branch}:refs/heads/{branch}");
+    ["push", "--set-upstream", "--", remote, refspec.as_str()]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
 }
 
 const LOG_FORMAT: &str = "%H%x1f%an%x1f%ae%x1f%at%x1f%P%x1f%s";
@@ -1078,10 +1161,7 @@ pub fn list_branches(
                 && !existing.is_head;
             if should_replace {
                 let is_head = existing.is_head || b.is_head;
-                deduped[existing_idx] = GitBranchEntry {
-                    is_head,
-                    ..b
-                };
+                deduped[existing_idx] = GitBranchEntry { is_head, ..b };
             } else if b.is_head && !existing.is_head {
                 let mut updated = deduped[existing_idx].clone();
                 updated.is_head = true;
@@ -1113,7 +1193,11 @@ fn push_worktree(
         b.clone()
     } else if let Some(ref sha) = head_sha {
         // if detached HEAD with no branch — show shortened SHA as name
-        let short = if sha.len() >= 7 { &sha[..7] } else { sha.as_str() };
+        let short = if sha.len() >= 7 {
+            &sha[..7]
+        } else {
+            sha.as_str()
+        };
         format!("(detached @ {})", short)
     } else {
         return;
@@ -1150,6 +1234,26 @@ pub fn checkout_branch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn set_upstream_push_ends_option_parsing_before_the_names() {
+        let args = set_upstream_args("origin", "feature/x");
+        assert_eq!(
+            args,
+            [
+                "push",
+                "--set-upstream",
+                "--",
+                "origin",
+                "refs/heads/feature/x:refs/heads/feature/x"
+            ]
+        );
+        let dashes = args.iter().position(|a| a == "--").unwrap();
+        assert!(args[..dashes]
+            .iter()
+            .all(|a| a == "push" || a.starts_with("--")));
+        assert!(args[dashes + 1..].iter().all(|a| !a.starts_with("--")));
+    }
 
     #[test]
     fn sha_is_safe_accepts_hex() {

@@ -1,5 +1,9 @@
-import { describe, expect, it } from "vitest";
-import { isExtractableArchive, relativePath } from "./contextActions";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  copyToClipboard,
+  isExtractableArchive,
+  relativePath,
+} from "./contextActions";
 
 describe("relativePath", () => {
   it("returns '.' when the path is the root itself", () => {
@@ -26,4 +30,15 @@ describe("isExtractableArchive", () => {
     expect(isExtractableArchive("/tmp/a.tgz")).toBe(true);
     expect(isExtractableArchive("/tmp/a.csv")).toBe(false);
   });
+});
+
+vi.mock("@tauri-apps/plugin-opener", () => ({ revealItemInDir: vi.fn() }));
+afterEach(() => vi.unstubAllGlobals());
+it("copies raw paths for pasting into any application", async () => {
+  const writeText = vi.fn();
+  vi.stubGlobal("navigator", { clipboard: { writeText } });
+  const path = "/work/it's a $file.txt";
+  await copyToClipboard(path);
+  await copyToClipboard(relativePath("/work", path));
+  expect(writeText.mock.calls).toEqual([[path], ["it's a $file.txt"]]);
 });

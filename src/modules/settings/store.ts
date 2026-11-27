@@ -1,9 +1,4 @@
 import {
-  type AgentLaunchCommands,
-  DEFAULT_AGENT_LAUNCH_COMMANDS,
-  normalizeAgentLaunchCommands,
-} from "@/modules/agents/lib/launcher";
-import {
   type AutocompleteProviderId,
   type CustomEndpoint,
   DEFAULT_AUTOCOMPLETE_MODEL,
@@ -19,7 +14,21 @@ import {
   type SttProvider,
   WHISPERCPP_DEFAULT_BASE_URL,
 } from "@/modules/ai/config";
+import {
+  type AgentLaunchCommands,
+  DEFAULT_AGENT_LAUNCH_COMMANDS,
+  normalizeAgentLaunchCommands,
+} from "@/modules/agents/lib/launcher";
 import type { KeyBinding, ShortcutId } from "@/modules/shortcuts/shortcuts";
+import {
+  coerceMacOptionAsAlt,
+  DEFAULT_MAC_OPTION_AS_ALT,
+  type MacOptionAsAlt,
+} from "@/modules/terminal/ghostty/input/macOptionAsAlt";
+import {
+  clampScrollSpeed,
+  DEFAULT_SCROLL_SPEED,
+} from "@/modules/terminal/ghostty/input/terminalWheel";
 import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { LazyStore } from "@tauri-apps/plugin-store";
 
@@ -30,8 +39,6 @@ export const DEFAULT_THEME_ID = "terax-default";
 export type BackgroundKind = "none" | "image";
 
 export type TerminalCursorStyle = "bar" | "block" | "underline";
-export type TerminalScrollbarMode = "auto" | "always" | "hidden";
-export type TabWidth = "default" | "compact" | "narrow";
 
 export const EDITOR_THEMES = [
   "kanagawa",
@@ -159,18 +166,19 @@ export type Preferences = {
   editorWordWrapColumn: number;
   showHidden: boolean;
   explorerGitDecorations: boolean;
-  terminalWebglEnabled: boolean;
+  terminalRenderer: TerminalRendererSetting;
+  tabWidth: TabWidth;
+  terminalScreenReader: boolean;
   terminalCursorBlink: boolean;
   terminalCursorStyle: TerminalCursorStyle;
-  tabWidth: TabWidth;
   terminalFontFamily: string;
   terminalFontWeight: string;
   terminalShell: string;
   terminalLetterSpacing: number;
   terminalFontSize: number;
   terminalScrollback: number;
-  terminalScrollbarMode: TerminalScrollbarMode;
-  terminalShowBlockMarkers: boolean;
+  terminalScrollSpeed: number;
+  terminalMacOptionAsAlt: MacOptionAsAlt;
   confirmCloseRunningTerminal: boolean;
   lastWslDistro: string | null;
   zoomLevel: number;
@@ -189,8 +197,6 @@ export type Preferences = {
   editorCustomFormatCommand: string;
   lspActivation: Record<string, LspActivation>;
   lspCustomServers: LspCustomServer[];
-  terminalAutoSuggestEnabled: boolean;
-  terminalCustomSuggestions: string[];
 };
 
 export type EditorFormatter =
@@ -259,18 +265,19 @@ const KEY_EDITOR_WORD_WRAP_COLUMN = "editorWordWrapColumn";
 const KEY_SHOW_HIDDEN = "showHidden";
 const LEGACY_KEY_SHOW_HIDDEN_DIRS = "showHiddenDirectories";
 const KEY_EXPLORER_GIT_DECORATIONS = "explorerGitDecorations";
-const KEY_TERMINAL_WEBGL_ENABLED = "terminalWebglEnabled";
+const KEY_TERMINAL_RENDERER = "terminalRenderer";
+const KEY_TAB_WIDTH = "tabWidth";
+const KEY_TERMINAL_SCREEN_READER = "terminalScreenReader";
 const KEY_TERMINAL_CURSOR_BLINK = "terminalCursorBlink";
 const KEY_TERMINAL_CURSOR_STYLE = "terminalCursorStyle";
-const KEY_TAB_WIDTH = "tabWidth";
 const KEY_TERMINAL_FONT_FAMILY = "terminalFontFamily";
 const KEY_TERMINAL_FONT_WEIGHT = "terminalFontWeight";
 const KEY_TERMINAL_SHELL = "terminalShell";
 const KEY_TERMINAL_LETTER_SPACING = "terminalLetterSpacing";
 const KEY_TERMINAL_FONT_SIZE = "terminalFontSize";
 const KEY_TERMINAL_SCROLLBACK = "terminalScrollback";
-const KEY_TERMINAL_SCROLLBAR_MODE = "terminalScrollbarMode";
-const KEY_TERMINAL_SHOW_BLOCK_MARKERS = "terminalShowBlockMarkers";
+const KEY_TERMINAL_SCROLL_SPEED = "terminalScrollSpeed";
+const KEY_TERMINAL_MAC_OPTION_AS_ALT = "terminalMacOptionAsAlt";
 const KEY_CONFIRM_CLOSE_RUNNING_TERMINAL = "confirmCloseRunningTerminal";
 const KEY_LAST_WSL_DISTRO = "lastWslDistro";
 const KEY_ZOOM_LEVEL = "zoomLevel";
@@ -287,12 +294,10 @@ const KEY_EDITOR_FORMATTER_BY_LANG = "editorFormatterByLang";
 const KEY_EDITOR_CUSTOM_FORMAT_COMMAND = "editorCustomFormatCommand";
 const KEY_LSP_ACTIVATION = "lspActivation";
 const KEY_LSP_CUSTOM_SERVERS = "lspCustomServers";
-const KEY_TERMINAL_AUTO_SUGGEST = "terminalAutoSuggestEnabled";
-const KEY_TERMINAL_CUSTOM_SUGGESTIONS = "terminalCustomSuggestions";
 
-export const TERMINAL_FONT_SIZE_DEFAULT = 14;
-export const TERMINAL_FONT_SIZE_MIN = 8;
-export const TERMINAL_FONT_SIZE_MAX = 32;
+const TERMINAL_FONT_SIZE_DEFAULT = 14;
+const TERMINAL_FONT_SIZE_MIN = 8;
+const TERMINAL_FONT_SIZE_MAX = 32;
 
 export const TERMINAL_FONT_SIZES = [
   10, 12, 13, 14, 15, 16, 18, 20, 22, 24,
@@ -309,14 +314,12 @@ export const EDITOR_WORD_WRAP_COLUMN_DEFAULT = 80;
 export const EDITOR_WORD_WRAP_COLUMN_MIN = 20;
 export const EDITOR_WORD_WRAP_COLUMN_MAX = 500;
 
-export const TERMINAL_SCROLLBACK_DEFAULT = 2000;
-export const TERMINAL_SCROLLBACK_MIN = 200;
-export const TERMINAL_SCROLLBACK_MAX = 50_000;
+const TERMINAL_SCROLLBACK_DEFAULT = 2000;
+const TERMINAL_SCROLLBACK_MIN = 200;
+const TERMINAL_SCROLLBACK_MAX = 50_000;
 export const TERMINAL_SCROLLBACK_PRESETS = [
   500, 1000, 2000, 5000, 10_000, 25_000,
 ] as const;
-// Lines written to the restart snapshot; anything above this only lives in RAM.
-export const TERMINAL_SNAPSHOT_SCROLLBACK_CAP = 5_000;
 
 export const DEFAULT_PREFERENCES: Preferences = {
   theme: "system",
@@ -330,7 +333,10 @@ export const DEFAULT_PREFERENCES: Preferences = {
   editorFontSize: EDITOR_FONT_SIZE_DEFAULT,
   customInstructions: "",
   autostart: false,
-  windowVibrancy: true,
+  // Off by default: a translucent window keeps the compositor blending the
+  // whole frame every present. An explicitly stored choice (either value)
+  // always wins; only an absent key falls back to this.
+  windowVibrancy: false,
   restoreWindowState: true,
   autocompleteEnabled: false,
   autocompleteTrigger: "auto",
@@ -357,18 +363,19 @@ export const DEFAULT_PREFERENCES: Preferences = {
   editorWordWrapColumn: EDITOR_WORD_WRAP_COLUMN_DEFAULT,
   showHidden: false,
   explorerGitDecorations: true,
-  terminalWebglEnabled: true,
+  terminalRenderer: "auto",
+  tabWidth: "default",
+  terminalScreenReader: false,
   terminalCursorBlink: false,
   terminalCursorStyle: "bar",
-  tabWidth: "default",
   terminalFontFamily: "",
   terminalFontWeight: "normal",
   terminalShell: "",
   terminalLetterSpacing: 0,
   terminalFontSize: TERMINAL_FONT_SIZE_DEFAULT,
   terminalScrollback: TERMINAL_SCROLLBACK_DEFAULT,
-  terminalScrollbarMode: "auto",
-  terminalShowBlockMarkers: true,
+  terminalScrollSpeed: DEFAULT_SCROLL_SPEED,
+  terminalMacOptionAsAlt: DEFAULT_MAC_OPTION_AS_ALT,
   confirmCloseRunningTerminal: true,
   lastWslDistro: null,
   zoomLevel: 1.0,
@@ -385,8 +392,6 @@ export const DEFAULT_PREFERENCES: Preferences = {
   editorCustomFormatCommand: "",
   lspActivation: {},
   lspCustomServers: [],
-  terminalAutoSuggestEnabled: true,
-  terminalCustomSuggestions: [],
 };
 
 const store = new LazyStore(STORE_PATH, { defaults: {}, autoSave: 200 });
@@ -456,9 +461,21 @@ export async function loadPreferences(): Promise<Preferences> {
     autocompleteProvider:
       get<AutocompleteProviderId>(KEY_AUTOCOMPLETE_PROVIDER) ??
       DEFAULT_PREFERENCES.autocompleteProvider,
-    autocompleteModelId:
-      get<string>(KEY_AUTOCOMPLETE_MODEL) ??
-      DEFAULT_PREFERENCES.autocompleteModelId,
+    autocompleteModelId: ((): string => {
+      const stored =
+        get<string>(KEY_AUTOCOMPLETE_MODEL) ??
+        DEFAULT_PREFERENCES.autocompleteModelId;
+      const provider =
+        get<AutocompleteProviderId>(KEY_AUTOCOMPLETE_PROVIDER) ??
+        DEFAULT_PREFERENCES.autocompleteProvider;
+      // Groq autocomplete ids come from the catalog, so a model removed
+      // there leaves stale selections pointing at deleted endpoints. Other
+      // providers accept runtime-supplied ids, so keep those untouched.
+      if (provider === "groq" && stored && !isKnownModelId(stored)) {
+        return DEFAULT_AUTOCOMPLETE_MODEL.groq ?? "";
+      }
+      return stored;
+    })(),
     lmstudioBaseURL:
       get<string>(KEY_LMSTUDIO_BASE_URL) ?? DEFAULT_PREFERENCES.lmstudioBaseURL,
     lmstudioModelId:
@@ -518,16 +535,15 @@ export async function loadPreferences(): Promise<Preferences> {
     explorerGitDecorations:
       get<boolean>(KEY_EXPLORER_GIT_DECORATIONS) ??
       DEFAULT_PREFERENCES.explorerGitDecorations,
-    terminalWebglEnabled:
-      get<boolean>(KEY_TERMINAL_WEBGL_ENABLED) ??
-      DEFAULT_PREFERENCES.terminalWebglEnabled,
+    terminalRenderer: coerceTerminalRenderer(get<string>(KEY_TERMINAL_RENDERER)),
+    tabWidth: coerceTabWidth(get<unknown>(KEY_TAB_WIDTH)),
+    terminalScreenReader: get<boolean>(KEY_TERMINAL_SCREEN_READER) === true,
     terminalCursorBlink:
       get<boolean>(KEY_TERMINAL_CURSOR_BLINK) ??
       DEFAULT_PREFERENCES.terminalCursorBlink,
     terminalCursorStyle: coerceTerminalCursorStyle(
       get<unknown>(KEY_TERMINAL_CURSOR_STYLE),
     ),
-    tabWidth: coerceTabWidth(get<unknown>(KEY_TAB_WIDTH)),
     terminalFontFamily:
       get<string>(KEY_TERMINAL_FONT_FAMILY) ??
       DEFAULT_PREFERENCES.terminalFontFamily,
@@ -547,15 +563,12 @@ export async function loadPreferences(): Promise<Preferences> {
       get<number>(KEY_TERMINAL_SCROLLBACK) ??
         DEFAULT_PREFERENCES.terminalScrollback,
     ),
-    terminalScrollbarMode: (() => {
-      const value = get<string>(KEY_TERMINAL_SCROLLBAR_MODE);
-      return value === "always" || value === "hidden" || value === "auto"
-        ? value
-        : DEFAULT_PREFERENCES.terminalScrollbarMode;
-    })(),
-    terminalShowBlockMarkers:
-      get<boolean>(KEY_TERMINAL_SHOW_BLOCK_MARKERS) ??
-      DEFAULT_PREFERENCES.terminalShowBlockMarkers,
+    terminalScrollSpeed: clampScrollSpeed(
+      get<number>(KEY_TERMINAL_SCROLL_SPEED),
+    ),
+    terminalMacOptionAsAlt: coerceMacOptionAsAlt(
+      get<unknown>(KEY_TERMINAL_MAC_OPTION_AS_ALT),
+    ),
     confirmCloseRunningTerminal:
       get<boolean>(KEY_CONFIRM_CLOSE_RUNNING_TERMINAL) ??
       DEFAULT_PREFERENCES.confirmCloseRunningTerminal,
@@ -602,12 +615,6 @@ export async function loadPreferences(): Promise<Preferences> {
     lspCustomServers:
       get<LspCustomServer[]>(KEY_LSP_CUSTOM_SERVERS) ??
       DEFAULT_PREFERENCES.lspCustomServers,
-    terminalAutoSuggestEnabled:
-      get<boolean>(KEY_TERMINAL_AUTO_SUGGEST) ??
-      DEFAULT_PREFERENCES.terminalAutoSuggestEnabled,
-    terminalCustomSuggestions:
-      get<string[]>(KEY_TERMINAL_CUSTOM_SUGGESTIONS) ??
-      DEFAULT_PREFERENCES.terminalCustomSuggestions,
   };
 }
 
@@ -828,8 +835,24 @@ export async function setExplorerGitDecorations(value: boolean): Promise<void> {
   await writePref(KEY_EXPLORER_GIT_DECORATIONS, value);
 }
 
-export async function setTerminalWebglEnabled(value: boolean): Promise<void> {
-  await writePref(KEY_TERMINAL_WEBGL_ENABLED, value);
+function coerceTabWidth(value: unknown): TabWidth {
+  return value === "default" || value === "compact" || value === "narrow"
+    ? value
+    : DEFAULT_PREFERENCES.tabWidth;
+}
+
+export async function setTabWidth(value: unknown): Promise<void> {
+  await writePref(KEY_TAB_WIDTH, coerceTabWidth(value));
+}
+
+export async function setTerminalRenderer(
+  value: TerminalRendererSetting,
+): Promise<void> {
+  await writePref(KEY_TERMINAL_RENDERER, coerceTerminalRenderer(value));
+}
+
+export async function setTerminalScreenReader(value: boolean): Promise<void> {
+  await writePref(KEY_TERMINAL_SCREEN_READER, value);
 }
 
 export async function setTerminalCursorBlink(value: boolean): Promise<void> {
@@ -846,21 +869,19 @@ export async function setTerminalCursorStyle(value: unknown): Promise<void> {
   await writePref(KEY_TERMINAL_CURSOR_STYLE, coerceTerminalCursorStyle(value));
 }
 
-export function coerceTabWidth(value: unknown): TabWidth {
-  return value === "default" || value === "compact" || value === "narrow"
-    ? value
-    : DEFAULT_PREFERENCES.tabWidth;
-}
-
-export async function setTabWidth(value: unknown): Promise<void> {
-  await writePref(KEY_TAB_WIDTH, coerceTabWidth(value));
-}
-
 export async function setTerminalFontFamily(value: string): Promise<void> {
   await writePref(KEY_TERMINAL_FONT_FAMILY, value.trim());
 }
 
 const TERMINAL_FONT_WEIGHT_VALUES = new Set(["normal", "500", "600", "bold"]);
+
+/** Renderer for new terminals: WebGPU with WebGL fallback, WebGPU, or WebGL. */
+type TabWidth = "default" | "compact" | "narrow";
+export type TerminalRendererSetting = "auto" | "webgpu" | "webgl";
+
+export function coerceTerminalRenderer(value: unknown): TerminalRendererSetting {
+  return value === "webgl" || value === "webgpu" ? value : "auto";
+}
 
 export function coerceFontWeight(value: string): string {
   const v = value.trim();
@@ -873,6 +894,16 @@ export async function setTerminalFontWeight(value: string): Promise<void> {
 
 export async function setTerminalShell(value: string): Promise<void> {
   await writePref(KEY_TERMINAL_SHELL, value.trim());
+}
+
+export async function setTerminalMacOptionAsAlt(
+  value: MacOptionAsAlt,
+): Promise<void> {
+  await writePref(KEY_TERMINAL_MAC_OPTION_AS_ALT, coerceMacOptionAsAlt(value));
+}
+
+export async function setTerminalScrollSpeed(value: number): Promise<void> {
+  await writePref(KEY_TERMINAL_SCROLL_SPEED, clampScrollSpeed(value));
 }
 
 export async function setTerminalLetterSpacing(value: number): Promise<void> {
@@ -902,18 +933,6 @@ function clampScrollback(value: number): number {
 
 export async function setTerminalScrollback(value: number): Promise<void> {
   await writePref(KEY_TERMINAL_SCROLLBACK, clampScrollback(value));
-}
-
-export async function setTerminalScrollbarMode(
-  value: TerminalScrollbarMode,
-): Promise<void> {
-  await writePref(KEY_TERMINAL_SCROLLBAR_MODE, value);
-}
-
-export async function setTerminalShowBlockMarkers(
-  value: boolean,
-): Promise<void> {
-  await writePref(KEY_TERMINAL_SHOW_BLOCK_MARKERS, value);
 }
 
 export async function setConfirmCloseRunningTerminal(
@@ -971,18 +990,6 @@ export async function setEditorCustomFormatCommand(
   await writePref(KEY_EDITOR_CUSTOM_FORMAT_COMMAND, value);
 }
 
-export async function setTerminalAutoSuggestEnabled(
-  value: boolean,
-): Promise<void> {
-  await writePref(KEY_TERMINAL_AUTO_SUGGEST, value);
-}
-
-export async function setTerminalCustomSuggestions(
-  value: string[],
-): Promise<void> {
-  await writePref(KEY_TERMINAL_CUSTOM_SUGGESTIONS, value);
-}
-
 export async function setAgentNotifications(value: boolean): Promise<void> {
   await writePref(KEY_AGENT_NOTIFICATIONS, value);
 }
@@ -1008,10 +1015,6 @@ export async function setShortcuts(
   value: Record<ShortcutId, KeyBinding[]> | {},
 ): Promise<void> {
   await writePref(KEY_SHORTCUTS, value);
-}
-
-export async function resetShortcuts(): Promise<void> {
-  await writePref(KEY_SHORTCUTS, DEFAULT_PREFERENCES.shortcuts);
 }
 
 export type PrefKey = keyof Preferences;
@@ -1059,18 +1062,19 @@ export async function onPreferencesChange(
     [KEY_EDITOR_WORD_WRAP_COLUMN]: "editorWordWrapColumn",
     [KEY_SHOW_HIDDEN]: "showHidden",
     [KEY_EXPLORER_GIT_DECORATIONS]: "explorerGitDecorations",
-    [KEY_TERMINAL_WEBGL_ENABLED]: "terminalWebglEnabled",
+    [KEY_TERMINAL_RENDERER]: "terminalRenderer",
+    [KEY_TAB_WIDTH]: "tabWidth",
+    [KEY_TERMINAL_SCREEN_READER]: "terminalScreenReader",
     [KEY_TERMINAL_CURSOR_BLINK]: "terminalCursorBlink",
     [KEY_TERMINAL_CURSOR_STYLE]: "terminalCursorStyle",
-    [KEY_TAB_WIDTH]: "tabWidth",
     [KEY_TERMINAL_FONT_FAMILY]: "terminalFontFamily",
     [KEY_TERMINAL_FONT_WEIGHT]: "terminalFontWeight",
-    [KEY_TERMINAL_SCROLLBAR_MODE]: "terminalScrollbarMode",
-    [KEY_TERMINAL_SHOW_BLOCK_MARKERS]: "terminalShowBlockMarkers",
     [KEY_TERMINAL_SHELL]: "terminalShell",
     [KEY_TERMINAL_LETTER_SPACING]: "terminalLetterSpacing",
     [KEY_TERMINAL_FONT_SIZE]: "terminalFontSize",
     [KEY_TERMINAL_SCROLLBACK]: "terminalScrollback",
+    [KEY_TERMINAL_SCROLL_SPEED]: "terminalScrollSpeed",
+    [KEY_TERMINAL_MAC_OPTION_AS_ALT]: "terminalMacOptionAsAlt",
     [KEY_CONFIRM_CLOSE_RUNNING_TERMINAL]: "confirmCloseRunningTerminal",
     [KEY_LAST_WSL_DISTRO]: "lastWslDistro",
     [KEY_ZOOM_LEVEL]: "zoomLevel",

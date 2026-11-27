@@ -19,26 +19,24 @@
 
 use std::sync::Mutex;
 
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", all(test, unix)))]
 use std::collections::HashMap;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", all(test, unix)))]
 use std::fs;
 #[cfg(target_os = "linux")]
 use std::path::PathBuf;
-#[cfg(target_os = "linux")]
-use tauri::Manager;
 
 #[derive(Default)]
 pub struct SecretsState {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", all(test, unix)))]
     cache: Mutex<Option<HashMap<String, String>>>,
     #[cfg(not(target_os = "linux"))]
     _phantom: Mutex<()>,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", all(test, unix)))]
 pub(crate) fn key(service: &str, account: &str) -> String {
     format!("{}::{}", service, account)
 }
@@ -55,7 +53,7 @@ fn read_store(app: &AppHandle) -> Result<HashMap<String, String>, String> {
     read_store_at(&store_path(app)?)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", all(test, unix)))]
 pub(crate) fn read_store_at(path: &std::path::Path) -> Result<HashMap<String, String>, String> {
     if !path.exists() {
         return Ok(HashMap::new());
@@ -64,33 +62,46 @@ pub(crate) fn read_store_at(path: &std::path::Path) -> Result<HashMap<String, St
     serde_json::from_slice::<HashMap<String, String>>(&bytes).map_err(|e| e.to_string())
 }
 
-#[cfg(target_os = "linux")]
-fn write_store(app: &AppHandle, map: &HashMap<String, String>) -> Result<(), String> {
-    write_store_at(&store_path(app)?, map)
-}
-
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", all(test, unix)))]
 pub(crate) fn write_store_at(
     path: &std::path::Path,
     map: &HashMap<String, String>,
 ) -> Result<(), String> {
     use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
 
-    let tmp = path.with_extension("json.tmp");
+    let parent = path.parent().ok_or("secrets path has no parent")?;
     let bytes = serde_json::to_vec(map).map_err(|e| e.to_string())?;
-
-    // 0600: only the owning user can read or write the secrets file.
-    let mut f = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&tmp)
+    let mut tmp = tempfile::Builder::new()
+        .prefix("secrets.json.")
+        .tempfile_in(parent)
         .map_err(|e| e.to_string())?;
-    f.write_all(&bytes).map_err(|e| e.to_string())?;
-    f.sync_all().map_err(|e| e.to_string())?;
-    fs::rename(&tmp, path).map_err(|e| e.to_string())?;
+    tmp.write_all(&bytes).map_err(|e| e.to_string())?;
+    tmp.as_file().sync_all().map_err(|e| e.to_string())?;
+    tmp.persist(path).map_err(|e| e.error.to_string())?;
+    fs::File::open(parent)
+        .and_then(|dir| dir.sync_all())
+        .map_err(|e| e.to_string())
+}
+
+#[cfg(any(target_os = "linux", all(test, unix)))]
+fn mutate_store_at(
+    state: &SecretsState,
+    path: &std::path::Path,
+    update: impl FnOnce(&mut HashMap<String, String>),
+    persist: impl FnOnce(&std::path::Path, &HashMap<String, String>) -> Result<(), String>,
+) -> Result<(), String> {
+    let mut guard = state.cache.lock().map_err(|e| e.to_string())?;
+    if guard.is_none() {
+        *guard = Some(read_store_at(path)?);
+    }
+    let mut candidate = guard.as_ref().expect("cache initialized above").clone();
+    update(&mut candidate);
+    if let Err(error) = persist(path, &candidate) {
+        // A rename can succeed before its directory sync fails.
+        *guard = read_store_at(path).ok();
+        return Err(error);
+    }
+    *guard = Some(candidate);
     Ok(())
 }
 
@@ -112,23 +123,45 @@ fn entry(service: &str, account: &str) -> Result<keyring::Entry, String> {
     keyring::Entry::new(service, account).map_err(|e| e.to_string())
 }
 
+// The keychain and the Linux file store both block (a locked keychain can wait
+// on the user), so every command runs on the blocking pool.
+fn blocking_secret<T: Send + 'static>(
+    app: AppHandle,
+    work: impl FnOnce(&AppHandle, &SecretsState) -> Result<T, String> + Send + 'static,
+) -> impl std::future::Future<Output = Result<T, String>> {
+    crate::modules::fs::blocking(move || {
+        let state = app.state::<SecretsState>();
+        work(&app, &state)
+    })
+}
+
 #[tauri::command]
 pub async fn secrets_get(
     app: AppHandle,
-    state: tauri::State<'_, SecretsState>,
     service: String,
     account: String,
 ) -> Result<Option<String>, String> {
+    blocking_secret(app, move |app, state| {
+        get_secret(app, state, &service, &account)
+    })
+    .await
+}
+
+fn get_secret(
+    app: &AppHandle,
+    state: &SecretsState,
+    service: &str,
+    account: &str,
+) -> Result<Option<String>, String> {
     #[cfg(target_os = "linux")]
     {
-        let _ = state; // capture
-        let key = key(&service, &account);
-        with_store(&app, &state, |m| m.get(&key).cloned())
+        let key = key(service, account);
+        with_store(app, state, |m| m.get(&key).cloned())
     }
     #[cfg(not(target_os = "linux"))]
     {
         let _ = (app, state);
-        let e = entry(&service, &account)?;
+        let e = entry(service, account)?;
         match e.get_password() {
             Ok(v) => Ok(Some(v)),
             Err(keyring::Error::NoEntry) => Ok(None),
@@ -140,27 +173,39 @@ pub async fn secrets_get(
 #[tauri::command]
 pub async fn secrets_set(
     app: AppHandle,
-    state: tauri::State<'_, SecretsState>,
     service: String,
     account: String,
     password: String,
 ) -> Result<(), String> {
+    blocking_secret(app, move |app, state| {
+        set_secret(app, state, &service, &account, password)
+    })
+    .await
+}
+
+fn set_secret(
+    app: &AppHandle,
+    state: &SecretsState,
+    service: &str,
+    account: &str,
+    password: String,
+) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
-        let key = key(&service, &account);
-        with_store(&app, &state, |m| {
-            m.insert(key, password);
-        })?;
-        let snapshot = {
-            let guard = state.cache.lock().map_err(|e| e.to_string())?;
-            guard.as_ref().cloned().unwrap_or_default()
-        };
-        write_store(&app, &snapshot)
+        let key = key(service, account);
+        mutate_store_at(
+            state,
+            &store_path(app)?,
+            |m| {
+                m.insert(key, password);
+            },
+            write_store_at,
+        )
     }
     #[cfg(not(target_os = "linux"))]
     {
         let _ = (app, state);
-        let e = entry(&service, &account)?;
+        let e = entry(service, account)?;
         e.set_password(&password).map_err(|e| e.to_string())
     }
 }
@@ -168,26 +213,37 @@ pub async fn secrets_set(
 #[tauri::command]
 pub async fn secrets_delete(
     app: AppHandle,
-    state: tauri::State<'_, SecretsState>,
     service: String,
     account: String,
 ) -> Result<(), String> {
+    blocking_secret(app, move |app, state| {
+        delete_secret(app, state, &service, &account)
+    })
+    .await
+}
+
+fn delete_secret(
+    app: &AppHandle,
+    state: &SecretsState,
+    service: &str,
+    account: &str,
+) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
-        let key = key(&service, &account);
-        with_store(&app, &state, |m| {
-            m.remove(&key);
-        })?;
-        let snapshot = {
-            let guard = state.cache.lock().map_err(|e| e.to_string())?;
-            guard.as_ref().cloned().unwrap_or_default()
-        };
-        write_store(&app, &snapshot)
+        let key = key(service, account);
+        mutate_store_at(
+            state,
+            &store_path(app)?,
+            |m| {
+                m.remove(&key);
+            },
+            write_store_at,
+        )
     }
     #[cfg(not(target_os = "linux"))]
     {
         let _ = (app, state);
-        let e = entry(&service, &account)?;
+        let e = entry(service, account)?;
         match e.delete_credential() {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
             Err(err) => Err(err.to_string()),
@@ -195,11 +251,145 @@ pub async fn secrets_delete(
     }
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::os::unix::fs::MetadataExt;
     use tempfile::TempDir;
+
+    #[test]
+    fn failed_commit_keeps_the_last_committed_cache() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("secrets.json");
+        let committed = HashMap::from([("saved".into(), "old".into())]);
+        write_store_at(&path, &committed).unwrap();
+        let state = SecretsState::default();
+        let result = mutate_store_at(
+            &state,
+            &path,
+            |map| {
+                map.insert("new".into(), "value".into());
+                map.remove("saved");
+            },
+            |_, _| Err("injected persistence failure".into()),
+        );
+        assert!(result.is_err());
+        assert_eq!(state.cache.lock().unwrap().as_ref(), Some(&committed));
+        assert_eq!(read_store_at(&path).unwrap(), committed);
+    }
+
+    #[test]
+    fn failure_after_rename_cannot_restore_a_stale_snapshot() {
+        for delete in [false, true] {
+            let tmp = TempDir::new().unwrap();
+            let path = tmp.path().join("secrets.json");
+            write_store_at(&path, &HashMap::from([("saved".into(), "old".into())])).unwrap();
+            let state = SecretsState::default();
+            let result = mutate_store_at(
+                &state,
+                &path,
+                |map| {
+                    if delete {
+                        map.remove("saved");
+                    } else {
+                        map.insert("saved".into(), "new".into());
+                    }
+                },
+                |path, candidate| {
+                    write_store_at(path, candidate)?;
+                    Err("injected directory sync failure after rename".into())
+                },
+            );
+            assert!(result.is_err());
+            mutate_store_at(
+                &state,
+                &path,
+                |map| {
+                    map.insert("other".into(), "value".into());
+                },
+                write_store_at,
+            )
+            .unwrap();
+            let disk = read_store_at(&path).unwrap();
+            assert_eq!(
+                disk.get("saved").map(String::as_str),
+                if delete { None } else { Some("new") }
+            );
+            assert_eq!(disk.get("other").map(String::as_str), Some("value"));
+            assert_eq!(state.cache.lock().unwrap().as_ref(), Some(&disk));
+        }
+    }
+
+    #[test]
+    fn concurrent_mutations_commit_in_order_and_survive_reload() {
+        for delete in [false, true] {
+            let tmp = TempDir::new().unwrap();
+            let path = tmp.path().join("secrets.json");
+            write_store_at(&path, &HashMap::from([("b".into(), "old".into())])).unwrap();
+            let state = SecretsState::default();
+            let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let (second_tx, second_rx) = std::sync::mpsc::channel();
+            std::thread::scope(|scope| {
+                let state = &state;
+                let path = &path;
+                let first = scope.spawn(move || {
+                    mutate_store_at(
+                        state,
+                        path,
+                        |map| {
+                            map.insert("a".into(), "first".into());
+                        },
+                        |path, map| {
+                            assert!(
+                                state.cache.try_lock().is_err(),
+                                "commit must own the transaction lock"
+                            );
+                            entered_tx.send(()).unwrap();
+                            release_rx.recv().unwrap();
+                            write_store_at(path, map)
+                        },
+                    )
+                });
+                entered_rx.recv().unwrap();
+                let second = scope.spawn(move || {
+                    second_tx.send(()).unwrap();
+                    mutate_store_at(
+                        state,
+                        path,
+                        |map| {
+                            if delete {
+                                map.remove("b");
+                            } else {
+                                map.insert("b".into(), "second".into());
+                            }
+                        },
+                        write_store_at,
+                    )
+                });
+                second_rx.recv().unwrap();
+                release_tx.send(()).unwrap();
+                first.join().unwrap().unwrap();
+                second.join().unwrap().unwrap();
+            });
+            let disk = read_store_at(&path).unwrap();
+            assert_eq!(disk.get("a").map(String::as_str), Some("first"));
+            assert_eq!(
+                disk.get("b").map(String::as_str),
+                if delete { None } else { Some("second") }
+            );
+            assert_eq!(state.cache.lock().unwrap().as_ref(), Some(&disk));
+        }
+    }
+
+    #[test]
+    fn failed_rename_leaves_no_staging_file() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("secrets.json");
+        fs::create_dir(&path).unwrap();
+        assert!(write_store_at(&path, &HashMap::new()).is_err());
+        assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 1);
+    }
 
     #[test]
     fn key_format_is_service_double_colon_account() {
@@ -245,7 +435,10 @@ mod tests {
         write_store_at(&p, &HashMap::new()).unwrap();
 
         let tmp_path = p.with_extension("json.tmp");
-        assert!(!tmp_path.exists(), "tmp file must be renamed away on success");
+        assert!(
+            !tmp_path.exists(),
+            "tmp file must be renamed away on success"
+        );
     }
 
     #[test]
@@ -279,16 +472,27 @@ mod tests {
 #[tauri::command]
 pub async fn secrets_get_all(
     app: AppHandle,
-    state: tauri::State<'_, SecretsState>,
     service: String,
+    accounts: Vec<String>,
+) -> Result<Vec<Option<String>>, String> {
+    blocking_secret(app, move |app, state| {
+        get_all_secrets(app, state, &service, accounts)
+    })
+    .await
+}
+
+fn get_all_secrets(
+    app: &AppHandle,
+    state: &SecretsState,
+    service: &str,
     accounts: Vec<String>,
 ) -> Result<Vec<Option<String>>, String> {
     #[cfg(target_os = "linux")]
     {
-        with_store(&app, &state, |m| {
+        with_store(app, state, |m| {
             accounts
                 .iter()
-                .map(|a| m.get(&key(&service, a)).cloned())
+                .map(|a| m.get(&key(service, a)).cloned())
                 .collect()
         })
     }
@@ -298,7 +502,7 @@ pub async fn secrets_get_all(
         Ok(accounts
             .into_iter()
             .map(|a| {
-                keyring::Entry::new(&service, &a)
+                keyring::Entry::new(service, &a)
                     .ok()
                     .and_then(|e| e.get_password().ok())
             })
