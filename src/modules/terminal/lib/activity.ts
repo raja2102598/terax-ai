@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from "react";
 
-export type TerminalActivityState =
+type TerminalActivityState =
   | "idle"
   | "running"
   | "success"

@@ -36,6 +36,7 @@ The comparison surface normalizes paths: backslashes to forward slashes, strips 
 - `authorize_spawn_cwd` rejects a spawn cwd outside an authorized root.
 - `authorize_user_spawn_cwd` registers the user's chosen cwd as a new root instead of rejecting it.
 - The registry is bootstrapped with the launch directory and the user's home directory (`workspace.rs:135`).
+- `authorize_derived(child, parent)` grants a linked git worktree on the strength of its parent repository: it only succeeds while the parent is authorized, stops counting if the parent is revoked, and `revoke_derived` removes it when the worktree is removed or pruned. A worktree git lists is re-granted only if its `.git` file points back into the repository's `worktrees/` directory.
 
 This is the allow side of the file-system boundary. Any new feature that spawns a shell or mutates files outside the current workspace must interact with this registry.
 
@@ -54,7 +55,7 @@ Auto-send after approval uses `lastAssistantMessageIsCompleteWithApprovalRespons
 `src-tauri/src/modules/net.rs` proxies AI provider requests and local-model pings. Before connecting:
 
 1. Resolve the hostname once (`resolve_and_classify`).
-2. Classify every resolved IP as public, private, loopback, or blocked metadata.
+2. Classify every resolved IP as public, private, loopback, or blocked metadata (`net/ip.rs`). An IPv6 address that carries an IPv4 destination (`::ffff:a.b.c.d`, `::a.b.c.d`, NAT64 `64:ff9b::/96`, 6to4 `2002::/16`, Teredo) takes the class of the embedded IPv4, and anything outside global unicast `2000::/3` (unique-local, site-local, link-local, multicast, documentation) is never public. Redirect targets are classified the same way.
 3. Block cloud metadata endpoints (`169.254.169.254`, `metadata.google.internal`, AWS IPv6 metadata, etc.).
 4. Pin reqwest to the resolved IPs so a second DNS lookup cannot return a different address (DNS rebinding).
 

@@ -1,3 +1,6 @@
+pub mod capture;
+pub mod rss;
+
 #[cfg(windows)]
 pub mod job;
 

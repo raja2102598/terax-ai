@@ -164,7 +164,7 @@ export function getProvider(id: ProviderId): ProviderInfo {
 }
 
 /** 1 (lowest) – 5 (highest). For `cost`, higher = cheaper. */
-export type CapabilityScore = 1 | 2 | 3 | 4 | 5;
+type CapabilityScore = 1 | 2 | 3 | 4 | 5;
 
 export type ModelCapabilities = {
   intelligence: CapabilityScore;
@@ -172,7 +172,7 @@ export type ModelCapabilities = {
   cost: CapabilityScore;
 };
 
-export type ModelTag = "vision" | "reasoning" | "tools" | "coding";
+type ModelTag = "vision" | "reasoning" | "tools" | "coding";
 
 export type ModelInfo = {
   id: string;
@@ -189,6 +189,17 @@ export type ModelInfo = {
 
 export const MODELS = [
   // ── OpenAI ────────────────────────────────────────────────────────────────
+  
+  {
+    id: "gpt-6-astra",
+    provider: "openai",
+    label: "GPT-6 Astra",
+    hint: "Flagship",
+    description: "Latest and greatest OpenAI model.",
+    capabilities: { intelligence: 5, speed: 4, cost: 1 },
+    tags: ["vision", "reasoning", "tools", "coding"],
+    supportsTemperature: false,
+  },
   {
     id: "gpt-5.6",
     provider: "openai",
@@ -352,6 +363,61 @@ export const MODELS = [
   },
 
   // ── Google ────────────────────────────────────────────────────────────────
+  // -------Gemini-----
+  {
+    id: "gemini-4-hydrogen",
+    provider: "google",
+    label: "Gemini 4 Hydrogen",
+    hint: "Frontier",
+    description: "Strong reasoning with the latest features and decent speed.",
+    capabilities: { intelligence: 5, speed: 3, cost: 3 },
+    tags: ["vision", "reasoning", "tools", "coding"],
+  },
+  {
+    id: "gemini-4-carbon",
+    provider: "google",
+    label: "Gemini 4 Carbon",
+    hint: "Flagship",
+    description: "Google's State-of-The-Art model.",
+    capabilities: { intelligence: 5, speed: 3, cost: 2 },
+    tags: ["vision", "reasoning", "tools", "coding"],
+  },
+  {
+    id: "gemini-4-argon",
+    provider: "google",
+    label: "Gemini 4 Argon",
+    hint: "Frontier",
+    description: "Efficient Gemini 4 frontier reasoning model.",
+    capabilities: { intelligence: 5, speed: 4, cost: 2 },
+    tags: ["vision", "reasoning", "tools", "coding"],
+  },
+  {
+    id: "gemini-3.8-flash",
+    provider: "google",
+    label: "Gemini 3.8 Flash",
+    hint: "Fast",
+    description: "Latest Gemini flash model with great speed and quality.",
+    capabilities: { intelligence: 4, speed: 5, cost: 4 },
+    tags: ["vision", "tools", "coding", "reasoning"],
+  },
+  {
+    id: "gemini-3.6-flash",
+    provider: "google",
+    label: "Gemini 3.6 Flash",
+    hint: "Fast",
+    description: "Fast Google multimodal model with great intelligence level.",
+    capabilities: { intelligence: 4, speed: 5, cost: 4 },
+    tags: ["vision", "tools", "coding", "reasoning"],
+  },
+  {
+    id: "gemini-3.5-flash-lite",
+    provider: "google",
+    label: "Gemini 3.5 Flash-Lite",
+    hint: "Lite",
+    description: "Fast, cheap, and lightweight multimodal model.",
+    capabilities: { intelligence: 3, speed: 5, cost: 5 },
+    tags: ["vision", "tools"],
+  },
   {
     id: "gemini-3.5-flash",
     provider: "google",
@@ -406,6 +472,26 @@ export const MODELS = [
     capabilities: { intelligence: 3, speed: 5, cost: 5 },
     tags: ["vision", "tools"],
   },
+  // -------Gemma-----
+  {
+    id: "gemma-4-31b-it",
+    provider: "google",
+    label: "Gemma 4 31B",
+    hint: "Heavy",
+    description: "State-of-The-Art Google open model with great intelligence.",
+    capabilities: { intelligence: 4, speed: 2, cost: 5 },
+    tags: ["vision", "tools", "coding", "reasoning"],
+  },
+  {
+    id: "gemma-4-26b-a4b-it",
+    provider: "google",
+    label: "Gemma 4 26B",
+    hint: "Balanced",
+    description: "A lighter Gemma model with fast responses mixed with raw intelligence.",
+    capabilities: { intelligence: 3, speed: 4, cost: 5 },
+    tags: ["vision", "tools", "coding", "reasoning"],
+  },
+  
 
   // ── xAI ───────────────────────────────────────────────────────────────────
   {
@@ -476,9 +562,9 @@ export const MODELS = [
     tags: ["reasoning", "tools", "coding"],
   },
   {
-    id: "deepseek-v4-flash",
+    id: "deepseek-flash",
     provider: "deepseek",
-    label: "DeepSeek V4 Flash",
+    label: "DeepSeek V4.1 Flash",    // v4 routes to v4.1 temporarily. v4 is no longer accesible.
     hint: "Fast",
     description: "Cheap and fast everyday tier.",
     capabilities: { intelligence: 4, speed: 5, cost: 5 },
@@ -552,7 +638,17 @@ export const MODELS = [
     tags: ["tools", "coding"],
   },
 
-  // ── Groq (autocomplete-tier) ──────────────────────────────────────────────
+  // ── Groq ──────────────────────────────────────────────
+
+  {
+    id: "openai/gpt-oss-120b",
+    provider: "groq",
+    label: "GPT-OSS 120B",
+    hint: "Balanced",
+    description: "Deep reasoning and tool use with fast Groq inference.",
+    capabilities: { intelligence: 4, speed: 4, cost: 3 },
+    tags: ["tools", "coding", "reasoning"],
+  },
   {
     id: "openai/gpt-oss-20b",
     provider: "groq",
@@ -563,6 +659,15 @@ export const MODELS = [
     tags: ["tools", "coding"],
   },
   {
+    id: "qwen/qwen3.8-27b",
+    provider: "groq",
+    label: "Qwen 3.8 27B",
+    hint: "Fast",
+    description: "Fast open model by Alibaba.",
+    capabilities: { intelligence: 3, speed: 5, cost: 2 },
+    tags: ["tools", "coding", "vision", "reasoning"],
+  },
+  {
     id: "llama-3.3-70b-versatile",
     provider: "groq",
     label: "Llama 3.3 70B",
@@ -571,15 +676,7 @@ export const MODELS = [
     capabilities: { intelligence: 4, speed: 5, cost: 5 },
     tags: ["tools"],
   },
-  {
-    id: "deepseek-r1-distill-llama-70b",
-    provider: "groq",
-    label: "DeepSeek R1 Distill 70B",
-    hint: "Thinking",
-    description: "Reasoning-distilled Llama on Groq.",
-    capabilities: { intelligence: 4, speed: 5, cost: 5 },
-    tags: ["reasoning", "tools"],
-  },
+  // deepseek-r1-distill-llama-70b is no longer avaiblable through Groq API.
 
   // ── OpenRouter (gateway; model id is user-supplied at runtime) ────────────
   {
@@ -719,6 +816,7 @@ export const DEFAULT_MODEL_ID: ModelId = "gpt-5.4-mini";
  *  context-usage indicator in the AI mini-window header. Conservative
  *  estimates — actual provider limits may shift. */
 export const MODEL_CONTEXT_LIMITS: Record<string, number> = {
+  "gpt-6-astra": 1_050_000,
   "gpt-5.6": 1_050_000,
   "gpt-5.6-terra": 1_050_000,
   "gpt-5.6-luna": 1_050_000,
@@ -735,12 +833,20 @@ export const MODEL_CONTEXT_LIMITS: Record<string, number> = {
   "claude-sonnet-4-6": 1_000_000,
   "claude-haiku-4-5": 200_000,
   "claude-opus-4-6": 1_000_000,
+  "gemini-3.8-flash": 1_000_000,
+  "gemini-3.6-flash": 1_000_000,
   "gemini-3.5-flash": 1_000_000,
+  "gemini-3.5-flash-lite": 1_000_000,
   "gemini-3.1-flash-lite": 1_000_000,
   "gemini-3.1-pro-preview": 1_000_000,
+  "gemini-4-hydrogen": 1_000_000,
+  "gemini-4-carbon": 1_000_000,
+  "gemini-4-argon": 1_000_000,
   "gemini-3-flash-preview": 1_000_000,
   "gemini-2.5-pro": 1_000_000,
   "gemini-2.5-flash": 1_000_000,
+  "gemma-4-26b-a4b-it": 262_144,
+  "gemma-4-31b-it": 262_144,
   "grok-4.5": 500_000,
   "grok-4.20-reasoning": 2_000_000,
   "grok-4.20-non-reasoning": 2_000_000,
@@ -748,14 +854,15 @@ export const MODEL_CONTEXT_LIMITS: Record<string, number> = {
   "grok-4.3": 1_000_000,
   "grok-build-0.1": 256_000,
   "deepseek-v4-pro": 1_000_000,
-  "deepseek-v4-flash": 1_000_000,
+  "deepseek-flash": 1_000_000,
   "deepseek-reasoner": 128_000,
   "gpt-oss-120b": 128_000,
   "llama3.3-70b": 128_000,
   "qwen-3-32b": 32_000,
+  "openai/gpt-oss-120b": 131_072,
   "openai/gpt-oss-20b": 128_000,
   "llama-3.3-70b-versatile": 128_000,
-  "deepseek-r1-distill-llama-70b": 128_000,
+  "qwen/qwen3.8-27b": 131_072,
   "openrouter-custom": 256_000,
   "openai-compatible-custom": 128_000,
   "lmstudio-local": 32_000,
@@ -784,6 +891,7 @@ export type ModelPricing = {
 };
 
 export const MODEL_PRICING: Record<string, ModelPricing> = {
+  "gpt-6-astra": { input: 10, output: 50 },
   "gpt-5.6": { input: 5, output: 30, cacheRead: 0.5 },
   "gpt-5.6-terra": { input: 2.5, output: 15, cacheRead: 0.25 },
   "gpt-5.6-luna": { input: 1, output: 6, cacheRead: 0.1 },
@@ -800,12 +908,20 @@ export const MODEL_PRICING: Record<string, ModelPricing> = {
   "claude-opus-4-6": { input: 15, output: 75, cacheRead: 1.5 },
   "claude-sonnet-4-6": { input: 3, output: 15, cacheRead: 0.3 },
   "claude-haiku-4-5": { input: 1, output: 5, cacheRead: 0.1 },
+  "gemini-3.8-flash": { input: 0.75, output: 3.75, cacheRead: 0.075 },
+  "gemini-3.6-flash": { input: 0.75, output: 3.75, cacheRead: 0.075 },
   "gemini-3.5-flash": { input: 0.3, output: 2.5, cacheRead: 0.075 },
+  "gemini-3.5-flash-lite": { input: 0.3, output: 2.5, cacheRead: 0.03 },
   "gemini-3.1-flash-lite": { input: 0.075, output: 0.3, cacheRead: 0.015 },
   "gemini-3.1-pro-preview": { input: 1.25, output: 10, cacheRead: 0.31 },
+  "gemini-4-hydrogen": { input: 1.5, output: 7.5, cacheRead: 0.075 },
+  "gemini-4-carbon": { input: 4, output: 20, cacheRead: 0.20 },
+  "gemini-4-argon": { input: 4, output: 20, cacheRead: 0.20 },
   "gemini-3-flash-preview": { input: 0.3, output: 2.5, cacheRead: 0.075 },
   "gemini-2.5-pro": { input: 1.25, output: 10, cacheRead: 0.31 },
   "gemini-2.5-flash": { input: 0.3, output: 2.5, cacheRead: 0.075 },
+  "gemma-4-26b-a4b-it":{ input: 0, output: 0, cacheRead: 0 },
+  "gemma-4-31b-it":{ input: 0, output: 0, cacheRead: 0 },
   "grok-4.5": { input: 2, output: 6, cacheRead: 0.5 },
   "grok-4.20-reasoning": { input: 3, output: 15 },
   "grok-4.20-non-reasoning": { input: 1, output: 5 },
@@ -813,7 +929,7 @@ export const MODEL_PRICING: Record<string, ModelPricing> = {
   "grok-4.3": { input: 1.25, output: 2.5 },
   "grok-build-0.1": { input: 1, output: 2 },
   "deepseek-v4-pro": { input: 0.28, output: 1.1, cacheRead: 0.028 },
-  "deepseek-v4-flash": { input: 0.07, output: 0.27, cacheRead: 0.007 },
+  "deepseek-flash": { input: 0.07, output: 0.27, cacheRead: 0.007 },
   "deepseek-reasoner": { input: 0.55, output: 2.19, cacheRead: 0.14 },
 };
 
@@ -839,7 +955,7 @@ export function estimateCost(
 }
 
 /** Providers that do not require an API key (local servers, key-optional). */
-export const KEYLESS_PROVIDERS: readonly ProviderId[] = [
+const KEYLESS_PROVIDERS: readonly ProviderId[] = [
   "lmstudio",
   "mlx",
   "ollama",
@@ -871,7 +987,7 @@ export const DEFAULT_AUTOCOMPLETE_MODEL: Partial<Record<ProviderId, string>> = {
   anthropic: "claude-haiku-4-5",
   google: "gemini-2.5-flash",
   xai: "grok-4.3",
-  deepseek: "deepseek-v4-flash",
+  deepseek: "deepseek-flash",
   openrouter: "openai/gpt-5.4-mini",
   "openai-compatible": "",
 };
@@ -898,9 +1014,8 @@ export const MLX_DEFAULT_BASE_URL = "http://127.0.0.1:8080/v1";
 export const OLLAMA_DEFAULT_BASE_URL = "http://localhost:11434/v1";
 export const OPENAI_COMPATIBLE_DEFAULT_BASE_URL = "";
 export const MAX_AGENT_STEPS = 24;
-export const TERMINAL_BUFFER_LINES = 300;
 
-export const SYSTEM_PROMPT = `You are Terax, an AI agent embedded in a developer terminal emulator. You are a hands-on engineer, not a chat bot — your job is to *do* the work, not narrate it.
+const SYSTEM_PROMPT = `You are Terax, an AI agent embedded in a developer terminal emulator. You are a hands-on engineer, not a chat bot — your job is to *do* the work, not narrate it.
 
 # Environment
 Every turn carries a short <env> block (prepended to the latest user message): workspace_root, active_terminal_cwd, optionally active_file. Treat it as ground truth — never ask the user where they are. The terminal scrollback is NOT auto-injected; call get_terminal_output only when the user references "this error" / "the last command" or you genuinely need to interpret recent output.
@@ -951,7 +1066,7 @@ Every turn carries a short <env> block (prepended to the latest user message): w
 - Code blocks always carry a language fence.
 - Refused reads on sensitive files (.env, .ssh, credentials) are final — don't retry.`;
 
-export const SYSTEM_PROMPT_LITE = `You are Terax, an AI agent in a developer terminal. Each turn carries an <env> block (workspace_root, active_terminal_cwd, optional active_file) prepended to the user's message — treat as ground truth.
+const SYSTEM_PROMPT_LITE = `You are Terax, an AI agent in a developer terminal. Each turn carries an <env> block (workspace_root, active_terminal_cwd, optional active_file) prepended to the user's message — treat as ground truth.
 
 Tools: read_file, list_directory, grep, glob, get_terminal_output, edit, multi_edit, write_file, create_directory, bash_run, bash_background, bash_logs, bash_list, bash_kill, suggest_command, open_preview.
 
@@ -971,9 +1086,11 @@ const LITE_SYSTEM_PROMPT_MODEL_IDS = new Set<string>([
   "claude-haiku-4-5",
   "gemini-2.5-flash",
   "gemini-3-flash-preview",
-  "deepseek-v4-flash",
+  "deepseek-flash",
   "gpt-oss-120b",
   "openai/gpt-oss-20b",
+  "openai/gpt-oss-120b",
+  "qwen/qwen3.8-27b",
   "llama3.3-70b",
   "llama-3.3-70b-versatile",
   "qwen-3-32b",

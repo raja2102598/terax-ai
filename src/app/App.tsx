@@ -7,6 +7,7 @@ import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { toast } from "sonner";
 import { consumeLaunchFiles, getLaunchDir } from "@/lib/launchDir";
+import { IS_MAC } from "@/lib/platform";
 import { quoteShellArg } from "@/lib/shellQuote";
 import { usePresence } from "@/lib/usePresence";
 import { useZoom } from "@/lib/useZoom";
@@ -30,7 +31,12 @@ import {
 } from "@/modules/ai";
 import { AiComposerProvider } from "@/modules/ai/lib/composer";
 import { native } from "@/modules/ai/lib/native";
-import { CommandPalette, createCommandItems } from "@/modules/command-palette";
+import {
+  CommandPalette,
+  createCommandItems,
+  type OpenFileTarget,
+  type PaletteInitialMode,
+} from "@/modules/command-palette";
 import { useControlBridge } from "@/modules/control";
 import {
   type EditorPaneHandle,
@@ -53,7 +59,9 @@ import { setShowHidden } from "@/modules/settings/store";
 import {
   type ShortcutHandlers,
   type ShortcutId,
+  shouldDisableAskSelection,
   shouldDisablePaneSwapShortcut,
+  tabDigit,
   useGlobalShortcuts,
 } from "@/modules/shortcuts";
 import {
@@ -88,6 +96,7 @@ import {
   disposeSession,
   findLeafCwd,
   hasLeaf,
+  isTerminalSurfaceTarget,
   leafIds,
   navigateFocusedBlocks,
   type PaneBounds,
@@ -99,8 +108,20 @@ import {
   writeToSession,
 } from "@/modules/terminal";
 import {
+  copyLeafCurrentBlock,
+  copyLeafScrollback,
+  scrollLeafToBottom,
+  scrollLeafToTop,
+  selectLeafCurrentBlock,
+} from "@/modules/terminal/lib/scrollbackActions";
+import type { TerminalSearchController } from "@/modules/terminal/search/TerminalSearchController";
+import { bindTerminalWindowFocus } from "@/modules/terminal/ghostty/renderScheduling";
+import { subscribeWindowPresentation } from "@/modules/terminal/ghostty/windowPresentation";
+import {
+  LivePageResizeBridge,
   ThemeProvider,
   useThemeFileEditing,
+  WindowActivityBridge,
   WindowVibrancyBridge,
 } from "@/modules/theme";
 import { UpdaterDialog } from "@/modules/updater";
@@ -112,8 +133,9 @@ import {
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import type { SearchAddon } from "@xterm/addon-search";
 import {
+  lazy,
+  Suspense,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -136,13 +158,18 @@ import { useAppCloseGuard } from "./hooks/useAppCloseGuard";
 import { useTabCloseGuards } from "./hooks/useTabCloseGuards";
 import { useWorkspaceSwitcher } from "./hooks/useWorkspaceSwitcher";
 
+// Real-application benchmark driver (scripts/app-lab). `__TERAX_BENCH__` is the literal `false`
+// in a normal build, so this is `null` and neither the import nor its chunk is emitted.
+const BenchBridge = __TERAX_BENCH__
+  ? lazy(() => import("@/bench/BenchBridge"))
+  : null;
+
 export default function App() {
   const {
     tabs,
     activeId,
     setActiveId,
     allocId,
-    reserveIds,
     booted,
     replaceTabs,
     moveTabToSpace,
@@ -193,9 +220,9 @@ export default function App() {
   }, [tabs, activeId]);
   const activeLeafId = activeTerminalTab?.activeLeafId ?? null;
 
-  const searchAddons = useRef<Map<number, SearchAddon>>(new Map());
+  const searchAddons = useRef<Map<number, TerminalSearchController>>(new Map());
   const [activeSearchAddon, setActiveSearchAddon] =
-    useState<SearchAddon | null>(null);
+    useState<TerminalSearchController | null>(null);
   const searchInlineRef = useRef<SearchInlineHandle | null>(null);
   const terminalRefs = useRef<Map<number, TerminalPaneHandle>>(new Map());
   const editorRefs = useRef<Map<number, EditorPaneHandle>>(new Map());
@@ -264,7 +291,6 @@ export default function App() {
     launchCwd,
     home,
     allocId,
-    reserveIds,
     replaceTabs,
     markBooted,
     setActiveSpaceForNewTabs,
@@ -315,6 +341,7 @@ export default function App() {
     sidebarRef,
     sidebarWidthRef,
     sidebarView,
+    sidebarCollapsed,
     initialSidebarCollapsed,
     persistSidebarView,
     persistSidebarCollapsed,
@@ -327,11 +354,10 @@ export default function App() {
 
   const [newEditorOpen, setNewEditorOpen] = useState(false);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
-  const [paletteInitialMode, setPaletteInitialMode] = useState<
-    "commands" | "content"
-  >("commands");
+  const [paletteInitialMode, setPaletteInitialMode] =
+    useState<PaletteInitialMode>("commands");
   const openCommandPalette = useCallback(
-    (mode: "commands" | "content" = "commands") => {
+    (mode: PaletteInitialMode = "commands") => {
       setPaletteInitialMode(mode);
       setCommandPaletteOpen(true);
     },
@@ -376,7 +402,7 @@ export default function App() {
   }, [activeId, activeLeafId]);
 
   const handleSearchReady = useCallback(
-    (leafId: number, addon: SearchAddon) => {
+    (leafId: number, addon: TerminalSearchController) => {
       searchAddons.current.set(leafId, addon);
       if (leafId === activeLeafId) setActiveSearchAddon(addon);
     },
@@ -644,8 +670,15 @@ export default function App() {
       if (activeLeafId === null) return;
       const term = terminalRefs.current.get(activeLeafId);
       if (!term) return;
-      term.write(`cd ${quoteShellArg(path)}\r`);
-      term.focus();
+      void term.writeAtPrompt(`cd ${quoteShellArg(path)}\r`).then((typed) => {
+        if (typed) {
+          term.focus();
+          return;
+        }
+        toast("Terminal is busy", {
+          description: "Open a new tab to go there, or exit the running program.",
+        });
+      });
     },
     [activeLeafId],
   );
@@ -666,11 +699,13 @@ export default function App() {
   );
 
   const handleOpenFile = useCallback(
-    (path: string, pin?: boolean) => {
+    (path: string, pin?: boolean, fragment?: string) => {
       // Markdown opens in its rendered view by default; a per-tab toggle flips
       // it to the raw editor. Other files default to preview (pin=false);
       // explicit actions like context-menu "Open" pass pin=true to persist.
-      if (isMarkdownPath(path)) newMarkdownTab(path);
+      const markdown = isMarkdownPath(path);
+      setPendingMarkdownFragment(markdown && fragment ? { path, fragment } : null);
+      if (markdown) newMarkdownTab(path);
       else openFileTab(path, pin ?? false);
     },
     [openFileTab, newMarkdownTab],
@@ -791,6 +826,9 @@ export default function App() {
     openSourceControl,
     openCommitHistoryTab,
   });
+  const explorerGitDecorations = usePreferencesStore(
+    (s) => s.explorerGitDecorations,
+  );
   const { sourceControl, toggleSourceControl, openGitGraphFromContext } =
     useSourceControlContext({
       activeTab,
@@ -801,13 +839,12 @@ export default function App() {
       launchCwdResolved,
       home,
       sidebarView,
+      sidebarCollapsed,
+      explorerGitDecorations,
       repositoryTarget: sourceControlRepositoryTarget,
       cycleSidebarView,
       openCommitHistoryTab,
     });
-  const explorerGitDecorations = usePreferencesStore(
-    (s) => s.explorerGitDecorations,
-  );
 
   const openPreviewTab = useCallback(
     (url: string) => {
@@ -880,6 +917,7 @@ export default function App() {
   const shortcutHandlers = useMemo<ShortcutHandlers>(
     () => ({
       "commandPalette.open": () => openCommandPalette("commands"),
+      "commandPalette.files": () => openCommandPalette("files"),
       "commandPalette.content": () => openCommandPalette("content"),
       "tab.new": openNewTab,
       "tab.newBlock": openNewBlockTab,
@@ -891,7 +929,7 @@ export default function App() {
       "tab.prev": () => stepSwitcher(-1),
       "tab.selectByIndex": (e) =>
         selectByIndex(
-          parseInt(e.key, 10) - 1,
+          (tabDigit(e, e.shiftKey) ?? 1) - 1,
           activeSpaceId ?? DEFAULT_SPACE_ID,
         ),
       "space.next": () => cycleSpace(1),
@@ -912,65 +950,35 @@ export default function App() {
       "terminal.toggleInput": () =>
         window.dispatchEvent(new CustomEvent(TOGGLE_BLOCK_INPUT_EVENT)),
       "terminal.copyFull": () => {
-        if (activeLeafId != null) {
-          void terminalRefs.current
-            .get(activeLeafId)
-            ?.copyFull()
-            .then((result) => {
-              if (result === "copied") {
-                toast.success("Full terminal copied", {
-                  id: "terminal-copy-full",
-                });
-              } else if (result === "empty") {
-                toast.info("Nothing to copy", { id: "terminal-copy-full" });
-              } else {
-                toast.error("Could not copy terminal output", {
-                  id: "terminal-copy-full",
-                });
-              }
-            });
-        }
+        if (activeLeafId == null) return;
+        void copyLeafScrollback(activeLeafId).then((result) => {
+          const id = "terminal-copy-full";
+          if (result === "copied") toast.success("Full terminal copied", { id });
+          else if (result === "empty") toast.info("Nothing to copy", { id });
+          else toast.error("Could not copy terminal output", { id });
+        });
       },
-      "terminal.scrollTop": () =>
-        activeLeafId != null
-          ? terminalRefs.current.get(activeLeafId)?.scrollToTop()
-          : undefined,
-      "terminal.scrollBottom": () =>
-        activeLeafId != null
-          ? terminalRefs.current.get(activeLeafId)?.scrollToBottom()
-          : undefined,
+      "terminal.scrollTop": () => {
+        if (activeLeafId != null) scrollLeafToTop(activeLeafId);
+      },
+      "terminal.scrollBottom": () => {
+        if (activeLeafId != null) scrollLeafToBottom(activeLeafId);
+      },
       "blocks.copyOutput": () => {
-        if (activeLeafId != null) {
-          void terminalRefs.current
-            .get(activeLeafId)
-            ?.copyCurrentBlock()
-            .then((result) => {
-              if (result === "copied") {
-                toast.success("Command block output copied", {
-                  id: "terminal-copy-block",
-                });
-              } else if (result === "empty") {
-                toast.info("No command block output to copy", {
-                  id: "terminal-copy-block",
-                });
-              } else {
-                toast.error("Could not copy command block output", {
-                  id: "terminal-copy-block",
-                });
-              }
-            });
-        }
+        if (activeLeafId == null) return;
+        void copyLeafCurrentBlock(activeLeafId).then((result) => {
+          const id = "terminal-copy-block";
+          if (result === "copied")
+            toast.success("Command block output copied", { id });
+          else if (result === "empty")
+            toast.info("No command block output to copy", { id });
+          else toast.error("Could not copy command block output", { id });
+        });
       },
-      "blocks.selectOutput": () =>
-        activeLeafId != null
-          ? (() => {
-              if (
-                !terminalRefs.current.get(activeLeafId)?.selectCurrentBlock()
-              ) {
-                toast.info("No command block output to select");
-              }
-            })()
-          : undefined,
+      "blocks.selectOutput": () => {
+        if (activeLeafId != null && !selectLeafCurrentBlock(activeLeafId))
+          toast.info("No command block output to select");
+      },
       "blocks.prev": () => navigateFocusedBlocks(-1),
       "blocks.next": () => navigateFocusedBlocks(1),
       "search.focus": () => {
@@ -1001,6 +1009,9 @@ export default function App() {
       "view.zenMode": () => setZenMode((v) => !v),
       "editor.undo": () => editorRefs.current.get(activeId)?.undo(),
       "editor.redo": () => editorRefs.current.get(activeId)?.redo(),
+      "editor.save": () => {
+        void editorRefs.current.get(activeId)?.save();
+      },
       "editor.aiComplete": () =>
         editorRefs.current.get(activeId)?.triggerAiComplete(),
       "editor.codeComplete": () =>
@@ -1047,6 +1058,7 @@ export default function App() {
       if (
         id === "editor.undo" ||
         id === "editor.redo" ||
+        id === "editor.save" ||
         id === "editor.aiComplete" ||
         id === "editor.codeComplete"
       ) {
@@ -1055,19 +1067,18 @@ export default function App() {
       if (id === "ai.askSelection") {
         const target =
           (e.target as HTMLElement | null) ?? document.activeElement;
-        const inTerminal = !!(target as HTMLElement | null)?.closest?.(
-          ".xterm",
+        return shouldDisableAskSelection(
+          e,
+          () => isTerminalSurfaceTarget(target),
+          () => !!captureActiveSelection()?.trim(),
         );
-        if (!inTerminal) return false;
-        const sel = captureActiveSelection();
-        return !sel || !sel.trim();
       }
       if (id === "terminal.clear") {
         // Only intercept ⌘K while a terminal is focused; elsewhere let the key
         // fall through (we never preventDefault when disabled).
         const target =
           (e.target as HTMLElement | null) ?? document.activeElement;
-        return !(target as HTMLElement | null)?.closest?.(".xterm");
+        return !isTerminalSurfaceTarget(target);
       }
       if (
         id === "terminal.toggleInput" ||
@@ -1091,16 +1102,14 @@ export default function App() {
         // sidebar. Ctrl+Shift+B (second binding) still toggles it from anywhere.
         const target =
           (e.target as HTMLElement | null) ?? document.activeElement;
-        const inTerminal = !!(target as HTMLElement | null)?.closest?.(
-          ".xterm",
-        );
+        const inTerminal = isTerminalSurfaceTarget(target);
         // Only defer the plain (no-shift) Ctrl/⌘+B binding; the Shift variant
         // is the always-on toggle and is never claimed by the terminal.
         return inTerminal && !e.shiftKey;
       }
       return false;
     },
-    [activeTab],
+    [activeTab, captureActiveSelection],
   );
 
   useGlobalShortcuts(shortcutHandlers, { isDisabled: shortcutsDisabled });
@@ -1371,6 +1380,23 @@ export default function App() {
   const pendingEditorNavigation = useRef<
     Map<number, { line?: number; focus: boolean }>
   >(new Map());
+  const [pendingMarkdownFragment, setPendingMarkdownFragment] = useState<{
+    path: string;
+    fragment: string;
+  } | null>(null);
+  const consumePendingMarkdownFragment = useCallback(
+    (path: string, fragment: string) => {
+      const norm = (p: string) => p.replace(/\\/g, "/");
+      setPendingMarkdownFragment((curr) =>
+        curr &&
+        norm(curr.path) === norm(path) &&
+        curr.fragment === fragment
+          ? null
+          : curr,
+      );
+    },
+    [],
+  );
   const openContentHit = useCallback(
     (path: string, line: number) => {
       const id = openFileTab(path, true);
@@ -1380,6 +1406,15 @@ export default function App() {
       else pendingEditorNavigation.current.set(id, { line, focus: true });
     },
     [openFileTab],
+  );
+
+  // `target.side` (open to the side) has no host support yet: plain open.
+  const openPaletteFile = useCallback(
+    (path: string, target: OpenFileTarget) => {
+      if (target.line !== undefined) openContentHit(path, target.line);
+      else handleOpenFile(path, true);
+    },
+    [openContentHit, handleOpenFile],
   );
 
   const openControlFile = useCallback(
@@ -1453,6 +1488,24 @@ export default function App() {
   const shell = (
     <ThemeProvider>
       <TooltipProvider>
+        {BenchBridge && (
+          <Suspense fallback={null}>
+            <BenchBridge
+              tabs={tabs}
+              activeId={activeId}
+              booted={booted}
+              setActiveId={setActiveId}
+              newTab={newTab}
+              newBlockTab={newBlockTab}
+              newAgentGroupTab={newAgentGroupTab}
+              splitActivePane={splitActivePane}
+              closeTab={closeTab}
+              readBuffer={(leafId, maxLines) =>
+                terminalRefs.current.get(leafId)?.getBuffer(maxLines) ?? null
+              }
+            />
+          </Suspense>
+        )}
         <div className="relative flex h-screen flex-col overflow-hidden bg-frame text-foreground">
           {!zenMode && (
             <Header
@@ -1534,6 +1587,7 @@ export default function App() {
                           onOpenGitHistory={handleOpenGitHistoryForPath}
                           onAttachToAgent={handleAttachFileToAgent}
                           pathDropTarget={terminalPathDropTarget}
+                          visible={!sidebarCollapsed}
                         />
                       ) : (
                         <SourceControlPanel
@@ -1582,6 +1636,9 @@ export default function App() {
                         onOpenCommitFile={openCommitFileDiffTab}
                         onGitHistorySearchHandle={setGitHistoryHandle}
                         onSetMarkdownView={setMarkdownView}
+                        onOpenFile={handleOpenFile}
+                        pendingMarkdownFragment={pendingMarkdownFragment}
+                        onConsumePendingMarkdownFragment={consumePendingMarkdownFragment}
                       />
                     </div>
 
@@ -1619,6 +1676,11 @@ export default function App() {
           )}
 
           <WindowVibrancyBridge />
+          {IS_MAC ? <LivePageResizeBridge /> : null}
+          <WindowActivityBridge
+            bindFocus={bindTerminalWindowFocus}
+            subscribePresentation={subscribeWindowPresentation}
+          />
 
           <AgentNotificationsBridge
             tabs={tabs}
@@ -1661,6 +1723,7 @@ export default function App() {
             commandItems={commandPaletteItems}
             workspaceRoot={explorerRoot}
             onOpenContentHit={openContentHit}
+            onOpenFile={openPaletteFile}
             insertCommand={insertHistoryCommand}
           />
 

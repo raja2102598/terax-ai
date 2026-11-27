@@ -4,7 +4,7 @@ Terax loads `TERAX.md` from the workspace root as agent memory (similar to AGENT
 
 ## Project
 
-**Terax**: open-source AI-native terminal emulator. Tauri 2 + Rust (`portable-pty`) backend, React 19 + TypeScript + xterm.js (webgl) client, BYOK AI via Vercel AI SDK v6.
+**Terax**: open-source AI-native terminal emulator. Tauri 2 + Rust (`portable-pty`) backend, React 19 + TypeScript + libghostty-vt WASM client (WebGPU, Terax WebGL fallback), BYOK AI via Vercel AI SDK v6.
 
 - Bundle id: `app.crynta.terax`
 - Package manager: **pnpm**
@@ -29,6 +29,315 @@ Verify before claiming done:
 
 A change to a core subsystem (terminal/shell spawn, workspace auth, git, fs, IPC or AI tool surface) needs a test that locks the invariant.
 
+## Terminal migration status
+
+libghostty-vt is the only terminal model. WebGPU is the default renderer and
+Terax WebGL is the compatibility fallback. Each leaf owns one persistent model
+in its own WebAssembly instance (the module is compiled once and shared), so
+closing a leaf drops its linear memory and scrollback instead of leaving a
+high-water mark; nothing may retain a view into a disposed model's memory.
+Scrollback summed over all leaves is capped by a budget (192 MiB, scaled fairly
+between leaves, never pruning history already held). Presentation resources are
+shared, bounded, and released for hidden leaves.
+All visible WebGPU panes of a window draw into one canvas that covers the
+terminal area (`gpu/WebGpuWindowCanvas.ts`; the `[data-terminal-area]` layer of
+`TerminalStack`, behind the tab layers). Each pane renders into its device-pixel
+snapped rectangle (`gpu/PaneRects.ts`, measured on layout changes only) with
+`setViewport` and `setScissorRect`, which keeps glyph overhang out of the
+neighbour; the shader takes viewport size and origin from the uniform, so a
+pane's pixels equal what a canvas of its own showed (verified byte for byte,
+`scripts/terminal-visual/grid.html`). Canvas textures are not preserved between
+frames, so a window frame clears the canvas and encodes every visible pane in one
+pass (cell buffers stay resident on the GPU, no per-cell work). Per-pane dirty
+tracking still decides whether a frame is needed: an unchanged window acquires
+no texture (`windowFrameNeeded`). `SurfaceFramePacer` decides which panes prepare
+in a frame; a pane whose rectangle moved always does. Pane DOM is transparent
+once the canvas has shown the pane's first frame (until then it paints the theme
+colour, so a tab switch never flashes the card behind); scrollbars, selection,
+IME, block overlays and cursor styles stay per-pane DOM above the canvas.
+A presented WebGPU canvas is never destroyed, unconfigured, shrunk or
+dropped while the runtime lives: WebKit (macOS 26) keeps the swapchain of such a
+canvas in the WebContent process for good (three buffers, about 30 MiB for a
+2000x1300 canvas, whatever the teardown order and garbage collection), and keeps
+every swapchain a resizing canvas retires until JavaScriptCore collects its
+wrappers (minutes), so every teardown or resize leaks. A tab switch, a split or a
+divider drag therefore only changes viewports: zero canvas allocations. The
+canvas is reallocated only when the terminal area itself changes size, at most
+twice per window drag (below). With no visible pane (an editor tab is active) or
+an occluded window it is paused (hidden after a short delay when empty), never released. A replaced or
+recovered GPU device reconfigures the same element, and a remounted area takes
+over the old one's canvas. Only disposing the runtime tears it down. The WebGL
+fallback stays per pane (its own canvas and opaque background inside the pane
+root): a WebGPU failure in one pane falls that pane back, and a failure of the
+shared runtime falls every pane back.
+Every submitted window frame is mirrored to JavaScriptCore (`gpu/GcPressure.ts`):
+the wrappers of a frame (texture, view, encoder, pass, command buffer) pin about
+13 KiB of WebKit malloc that JavaScriptCore does not count, so without help it
+collects them after minutes (20 MiB a minute for a streaming agent). Allocating and
+dropping a 126 KiB `ArrayBuffer` per frame (ten times the native cost; measured:
+unfinalized canvas textures after 120 s 2,626 without, 195 with it, no change in
+instructions per second) makes young-generation collections run steadily. At most
+4 MiB a second is mirrored, so display-rate frames allocate no more than a 25 fps agent.
+Resizing applies one synchronized model + PTY resize per gesture. Every SIGWINCH
+makes zsh/fish and Ink-based agents redraw, and redraws that do not line up with a
+reflowed grid leave duplicates in scrollback, so during a resize gesture (native
+macOS live resize via `NSWindowWillStart/DidEndLiveResize`, forwarded as
+`liveResize` in `terax:window-presentation`; a pane divider drag via
+`terminalResizeInteraction`; elsewhere a burst of size changes less than 150 ms
+apart, `lib/terminalResizeGesture.ts`) neither the model nor the PTY changes. The
+pane follows the pointer at display rate (`SurfaceFramePacer` gesture mode) and
+draws its existing grid: shifted up (`shift_y`) so the cursor row stays visible
+when the pane is shorter, clipped on the right or padded with the background
+otherwise. At release `TerminalResizeSync` resizes the model and tells the PTY in
+one call, model first. Ghostty clears the prompt on that resize and relies on the
+shell's redraw, so the pane holds its previous frame until the redraw ends or
+70 ms pass (`core/ResizePromptHold.ts`; only at an OSC 133 prompt, never in the
+alternate screen). Resizes outside a gesture (sidebar, font, ratio, first fit,
+showing a hidden pane) apply at once. During a gesture the window canvas's backing
+store is grow-only: it keeps its allocation while the area shrinks and, when the
+area outgrows it, allocates once to the largest size it can reach
+(`gpu/GestureBacking.ts`: the area plus the screen room left when the window
+itself is dragged, else the window; capped by the device limit), then compacts at
+release, so a drag costs at most one growth and one compaction. The WebGL
+fallback defers the same way per pane (top-anchored).
+
+The WebGPU path (renderer v2, `docs/architecture/terminal-renderer-v2.md`) runs
+no per-cell JavaScript. Ghostty encodes 16-byte cell records natively and
+reports only rows whose bytes changed. The surface uploads those ranges straight
+from WASM memory (`consumeGpuFrame`) into a storage buffer, and nothing may call
+the model between that frame and the upload because the view is borrowed. It
+never touches the structure-of-arrays APIs, which would flip the model's format;
+only the WebGL fallback uses them. A background pass derives each cell from its
+pixel (background, search, selection, cursor, decorations) and an instanced
+glyph pass draws integer-pixel quads with unfiltered `textureLoad`. Selection and
+cursor are uniforms and the search highlight is a mask buffer that exists only
+while something is highlighted, so none of them rewrites cell records.
+Geometry is pixel exact. Fonts are measured at size times ratio and cells are
+whole device pixels (`TerminalFontMetrics.deviceCell*`). `cellWidth` and
+`cellHeight` are the CSS size, device divided by ratio, and are what fit,
+hit-testing, selection, links and block overlays use. A pane's rectangle in the
+window canvas holds at least cols by rows device cells (slack is background, the
+scissor clips the rest) and the canvas origin is translated onto the device
+pixel grid when the observer, ratio or window size changes. A ratio change
+re-measures the font and rebuilds atlas and buffers.
+Each terminal maps Ghostty glyph ids to a glyph atlas shared per font and ratio.
+The atlas grows (coverage 1024 to 2048 to 4096, colour 512 to 2048) before it
+flushes into a new epoch; after a flush each surface rescans its visible cells and
+re-rasterizes only what it shows. Rasterization is limited to about two
+milliseconds per frame across surfaces, leftover glyphs draw on follow-up frames,
+and a backlog from scrolled-away output keeps only visible glyphs queued.
+Both renderers draw identical glyph pixels at every ratio (visual harness parity
+at 1, 1.25, 1.5 and 2), so grayscale text gets no contrast curve unless
+`localStorage["terax:terminal-text-contrast"]` is `on` or a strength; when set, both
+renderers apply the same curve. Private-use glyphs follow a constraint per range
+(`gpu/GlyphPlacement.ts`): version-control icons as designed, other icons as designed
+but shrunk past their room or the cell height, Powerline separators and extras
+stretched to fill their cells exactly. An icon or extra that may take two cells has two
+forms and takes two only when the next cell is blank, it is not the last column and
+the cell before is not a symbol (Ghostty's `constraintWidth`); otherwise it is held and
+clipped to its own cell. WebGPU stores the forms as two consecutive atlas entries and
+the glyph vertex shader picks one from the neighbouring cell records (glyph id 0 after
+it, the symbol flag of the glyph before it), so no per-cell JavaScript runs; WebGL
+decides per cell in the row rebuild. A solid block cursor
+draws the glyph it covers in the theme's cursor accent (both cells of a wide
+character), and the fit keeps a 14 px gutter free at the right of the grid.
+Box drawing, block elements, braille, powerline separators and common legacy
+computing shapes are drawn procedurally at exactly the cell size, not from the
+font, with Ghostty's sprite geometry (`gpu/BuiltinGlyphs.ts`, pure, shared by
+the WebGPU and WebGL atlases), so borders and bars join seamlessly at every size
+and ratio. They ignore bold and italic and skip the text contrast curve.
+Native cell, grapheme and hyperlink presentation buffers allocate on first use
+and return to the WASM allocator when a pane is hidden. Hidden parsing does not
+rebuild them. Window pauses (occlusion, sleep) retain them and the uploaded cell
+data.
+Unchanged frames do not acquire presentation textures or draw; cursor-only
+updates upload only the uniform. WebGL background and decoration geometry uses
+row range uploads while rectangle counts are stable; structural changes rebuild
+the compact stream. Scrollbar synchronization never reads the DOM on presented
+frames; moving the thumb under a bottom-pinned view costs at most ten position
+writes and four ARIA updates a second. Blink timers stop in unfocused windows,
+and native cursor hiding stops cursor timers. Selection is a uniform and needs no
+row damage; streaming search invalidations coalesce instead of rebuilding per
+output chunk.
+WebGL surface and renderer code load only when selected, needed for fallback,
+or explicitly requested by diagnostics. Delayed imports cannot install into a
+closed, restarted, or replaced session.
+xterm, its addons, CSS, snapshots, session pool, and dormant byte ring are removed.
+Unsupported graphics produce a visible error with retry instead of changing models.
+
+Command blocks use parser-time Ghostty tracked pins, including endpoint columns,
+so command ranges survive reflow and exclude following prompts and commands.
+The native marker ring is capped at 2,048 pins; JavaScript history is capped at
+1,000 blocks and 512 KiB of estimated UTF-16 command/cwd text. Block implementation
+and UI load only for block sessions, and hidden/occluded block presentation stops.
+Block search yields after 128 rows or four milliseconds, retains at most 500
+matches, and cancels obsolete queries. Block copy, search, sticky headers, navigation, Ask AI, rerun, shared shell input,
+and selection all use the same persistent Ghostty model.
+Block chrome commits with its matching renderer frame; it is recomputed only when
+the viewport origin, scrollback, size, cell height, block mode or block set
+(`GhosttyBlocks.revision`) changed, so frames that only repaint cells cost no
+block work and no React commit. The per-frame path reads cached cell metrics, never
+layout, and the shell/prompt input switch runs on block-mode changes, not per PTY
+chunk. Command-editor focus does
+not lower active-pane cadence. Divider padding is presentation-only and does not
+change copied command boundaries. Scrollbars preserve native fractional positions
+and ignore delayed programmatic scroll events. Hidden output does no surface DOM
+or search-mask work until presentation resumes.
+
+Terminal clipboard shortcuts use the native text clipboard plugin on all desktop
+platforms. Context clicks expose the selected text through the input element to
+restore the webview's native text menu; no persistent DOM scrollback is maintained.
+On macOS the input `<textarea>` always holds one selected placeholder character
+(`TerminalInputProxy`; elsewhere it stays empty, a selection could take X11 PRIMARY): a focused editable with a collapsed selection keeps
+WebKit's caret animation (a display link at display rate) running at ~3 % CPU and
+~250 wakeups/s while idle, a non-collapsed selection paints no caret (0.2 %, ~10/s).
+It re-arms after input, key release and focus, never during IME composition, and
+native Copy/Cut without terminal text must not copy the placeholder.
+Unclaimed macOS Command shortcuts reach the native menu after explicit clipboard,
+block-editor, and readline bindings, including when Kitty keyboard mode is active.
+The block prompt retains an enabled terminal input proxy for native menus and
+routes editing keys, composed text and paste back to its command editor.
+Character drags retain a native selection pin from pointerdown, including before
+the first pointermove. Unmoved clicks and lost captures discard provisional pins.
+Clipboard shortcuts match the letter the layout types (the physical key only for layouts without Latin letters), AltGr is read from `getModifierState("AltGraph")`, and the macOS Option-as-Alt setting (`off`, `left`, `right`, `both`) tracks which Option key is held. Key encoding supplies the base character only where Kitty keyboard mode escape-codes
+text (a held Ctrl, Alt or Super, or report-all-keys); Shift-only and plain text stay text, Ctrl+Shift+letter is the control byte outside the protocol, Windows/Linux Ctrl+Backspace is Ctrl+W outside it,
+lock modifiers are reported only at the report-all-keys level, and key releases follow
+the presses that were escape-coded. The wheel accumulates whole lines scaled by the
+`terminalScrollSpeed` preference (history and cursor keys move a line at a time, a mouse
+report stands for three lines, at most ten per event) and becomes cursor keys on the
+alternate screen under DEC 1007; the input element is moved onto the cursor cell only for the length of an IME
+composition (`ImeAnchor`).
+Terminal text uses the configured font, an installed Nerd Font when detected,
+or bundled JetBrains Mono. Per codepoint the chain is that font, JetBrains Mono, an
+installed Symbols Nerd Font, then two bundled private-use-only faces: the BMP area
+(365 kB, loaded with the first terminal before rasterization) and the Material
+Design icons (349 kB, fetched when such a glyph is first drawn, blank until then;
+its arrival rebuilds the atlases through `TerminalFontSpec.symbols`). Neither is in
+the startup graph. Installed fonts are detected by canvas measurement, never
+`document.fonts.check`. Native color emoji remain on the system fallback path. Rerun requires the complete command
+submitted through Terax; truncated shell labels are never executed.
+Primary-screen full erase, scrollback erase, and terminal reset invalidate block
+pins at parse time and clear block chrome, selection, and search. Commands after
+an erase in the same output chunk retain their new pins. Alternate-screen erases
+preserve primary block history. Block scrollbar status dots are removed along
+with their timers and history scans.
+
+The shared command bar activates after shell integration confirms prompt input.
+Bare shells keep direct terminal input. Bash before 4.4 reports
+`OSC 133;B;terax_blocks=0` and keeps its native prompt because it lacks PS0.
+
+Settings offer Automatic, WebGPU or WebGL for new terminals (Automatic and WebGPU
+use WebGPU where the webview has it, WebGL otherwise on every platform;
+`window.__teraxTerm().renderer` reports the choice), plus opt-in screen reader
+output. Accessible text is limited to 256 rows / 64 KiB and refreshes at most four
+times per second while visible. Link detection (URLs, file paths with `:line:col`) runs on pointer demand while Cmd (Ctrl elsewhere) is held, and its code (`terminalLinksRuntime`: detection, hover chip, confirmation and activation) loads on the first such movement, press or key press so the first terminal does not pay for it (`terminalLinksLoader` is the only eager part: one dynamic import made once the surface exists. `LazyTerminalLinks`, loaded by it, is a few listeners and a short queue that replays the pointer and key events that happened while the runtime loaded, so the first Cmd/Ctrl-click needs no second one, and it lets go of the key listener when the pointer leaves; `eager-budget.test.ts` locks the boundary);
+OSC 8 links take precedence. Links use pointer events (the selection controller cancels `pointerdown`, which suppresses mouse events), underline across wrapped rows, open http and https directly, confirm mailto, tel, credentials, punycode and HTTP(S) OSC 8 links whose text is not their address (a chip names the destination while the modifier is held), block other schemes, and open existing files in the editor at their line. Local file URLs open in the editor without confirmation even when their OSC 8 text differs from the destination. OSC 52 side effects retain one in-flight write and
+only the latest pending value across the window.
+
+The adapted Ghostty revision is pinned in `packages/ghostty-core/adapted/UPSTREAM.md`.
+Both SIMD and scalar artifacts are shipped; the loader fetches only the variant
+the webview supports. Scalar validation explicitly disables SIMD instructions
+and types. This avoids changing OS minimums solely for the WASM SIMD requirement;
+actual older WKWebView and WebKitGTK compatibility still needs platform tests.
+
+PTY output is one multiplexed pull stream per window (`docs/architecture/pty-transport-v2.md`),
+not a channel per terminal. The async `terax-pty` URI scheme (`pty/protocol.rs`) has two POST
+endpoints: `poll`, kept outstanding exactly once per webview, and `ack`. One process-wide hub
+thread (`pty/hub.rs`, scheduler in plain data driven by explicit time) holds the poll's responder
+and answers with framed binary data (`pty/wire.rs`: `[u32 id][u8 kind][u32 len]`, kinds data, exit,
+failed, sync; data frames carry their stream offset; responses are capped at 1 MiB) for every
+terminal whose coalescing deadline is due. A terminal's presentation class picks its deadline:
+focused 4 ms (16 ms sustained), visible 16 ms, hidden 100 ms, window occluded or asleep 250 ms;
+256 KiB pending is always due, and terminals due within 4 ms ride in the same response (one
+terminal contributes at most 512 KiB per response, so floods pipeline and share). The
+frontend reports classes only on change (`pty_set_presentation`, from `lib/ptyPresentation.ts`);
+each report carries a growing sequence number and a terminal keeps the newest one that named it,
+because async commands can be applied out of order. macOS occlusion and sleep reach the hub natively
+from `window_presentation.rs`. The stream token from `pty_stream_open` is the credential: any frame
+can reach the scheme but only the page can invoke, so every request is admitted (`pty/gate.rs`) on
+the handler's thread before it may wake the hub: the `Origin` must be the app's own
+(`tauri://localhost`, `http(s)://tauri.localhost` on Windows, the dev server in dev builds; a request
+without `Origin` is token-only), the body at most 3084 bytes (413) and well framed (400), and the
+token the live one for the requesting webview (403; the hub publishes label to token, compared in
+constant time). Responses echo the allowed origin with `Vary: Origin`, never `*`. Tokens come from OS
+entropy only: if it fails, `pty_stream_open` fails instead of falling back to the clock. A terminal's
+output is held until its receiver announces itself, and reload or window
+destruction drops the held responder, kills the token and detaches that window's terminals.
+Frontend `PtyOutputHub` owns the loop: it re-polls on a response before parsing and demultiplexes
+to the `PtyOutputReceiver`s, whose cumulative parsed offsets ride on the next poll. An ack-only
+request goes out only for new receivers, for more than 512 KiB of unsent progress, or when native
+sends `sync` because it waits on that terminal (credit blocked or exiting).
+
+Receivers parse in at most 32 KiB slices with a four-millisecond work budget on a shared FIFO
+MessageChannel task queue, which closes its ports when idle. Only fully parsed original chunks
+earn credit. Credit is bytes: at most 1 MiB in flight (128 chunks) and 2 MiB pending plus in
+flight per terminal. Acknowledgments are cumulative offsets validated against delivered chunk
+boundaries, so duplicates and retries cannot grant credit; a bad boundary or stream gap fails only
+that terminal visibly. Parser failures stop delivery without acknowledging unconsumed bytes.
+Transport failures retry with capped backoff and surface as one stalled/failed toast per
+terminal. Exit waits for the reader drain and the final acknowledgments; the `exit` frame always
+follows that terminal's last data frame. Unix readers sleep on PTY readiness plus an explicit
+shutdown signal without a polling timer. After shell exit they consume ready output, bounded to
+2 MiB / 30 seconds, rather than wait indefinitely for an inherited slave descriptor to close.
+Exceeding this drain bound reports a reader failure and exit status -1. After shell exit,
+30 seconds without acknowledgment progress closes a stalled queue with a logged delivery failure
+and exit status -1. The deadline is armed before ConPTY close and thread joins; it does not run
+during live-shell backpressure. Close wakes blocked queue workers and the Unix reader; Windows
+keeps draining the pipe while ConPTY closes. Per-read costs stay low: the agent and DA filters
+scan with `memchr` and copy runs, the reader checks an atomic `closed` flag and reuses its
+buffers, input goes through one bounded queue to a per-session writer thread, worker threads use
+128-256 KiB stacks, and `pty_has_foreground_process` lists children with `proc_listchildpids` or
+`/proc/<pid>/task/*/children` instead of forking `pgrep`.
+
+Enable release diagnostics with `localStorage.setItem("terax:terminal-diagnostics", "1")`
+and reload. `window.__teraxTerm()` reads frontend counters;
+`await window.__teraxTermSnapshot()` adds native queue counters and explicitly
+labeled host RSS. Host RSS
+excludes WebContent and GPU processes and is not total application memory.
+
+Ghostty presentation uses shared native macOS occlusion/sleep and DOM visibility
+tracking. Every renderer pauses immediately. The WebGPU renderer does nothing
+more: frames and timers stop, while the window canvas (configured, at full size), cell
+buffers, glyph maps and atlas textures stay resident, so coming back from a
+Space switch, minimize or sleep costs one redraw and no allocation. Releasing
+them is worse than keeping them (see the window canvas above). The WebGL fallback
+still reclaims its renderer after two seconds of continuous occlusion, and at
+once on sleep, because its dropped canvases are garbage collected (measured:
+transient, no growth). Hidden tabs release their buffers and atlas lease immediately and
+leave the window canvas (its size is kept). Per-pane pacing prevents focused output from
+raising background pane cadence. Panes that are neither focused nor being
+interacted with snap to one shared tick (30 Hz, 15 Hz in an unfocused window):
+a pane that turns dirty waits for the end of its tick and presents with every
+other pane of that tick in one encoder, submission and commit, at most once per
+tick. The planner asks for an animation frame only for the vsync that can serve
+the next deadline (the refresh interval and phase are learned from callback
+timestamps), sleeping on a timer otherwise, so a 120 Hz display does not pay a
+callback per vsync. A timer sleeping for a later tick is re-planned when a pane
+that is due sooner turns dirty, so the focused pane never waits behind it.
+WebGPU permits at most two outstanding frame submissions and keeps one
+`onSubmittedWorkDone` wait outstanding at a time: frames submitted while it is
+pending ride the next wait, which starts when it resolves (waiting only every
+second frame was tried and cut a 32 Hz producer to 23 presented frames a second).
+User wheel, drag, and keyboard interaction gives only its pane 150 ms of focused
+cadence, including in an unfocused visible window. It starts no idle timer or
+frame loop.
+`window.__teraxTermTrace()` explicitly starts a bounded ten-minute resource trace;
+it is never started automatically. `pnpm soak:ghostty` exercises real WASM models
+without launching the application. `pnpm profile:ghostty` compares allocation
+and parsing workloads in a fresh process per artifact and optional baseline.
+`pnpm profile:renderer:macos` exercises the real renderer in an isolated native
+WKWebView, including optional four-pane layouts and live visual inspection.
+`scripts/terminal-visual` draws a fixed pattern through any source tree and reads
+the canvas back as exact pixels for comparison.
+`pnpm test:ipc:macos` verifies binary AI streaming, cancellation, and conversation
+storage in a separate Tauri profile with synthetic local HTTP responses.
+Resource evidence and limitations live in
+`docs/architecture/ghostty-resource-efficiency.md`.
+
+The release gates and current verification evidence are in
+`docs/architecture/ghostty-release-readiness.md`. Automated checks alone do not
+establish production readiness, platform parity, or multi-day resource stability.
+
 ## Conventions
 
 - **Comments**: default to none, the code should explain itself. If genuinely needed, 1-2 lines on *why*, never *what*. No AI-generic filler.
@@ -43,17 +352,16 @@ A change to a core subsystem (terminal/shell spawn, workspace auth, git, fs, IPC
 
 **Rust (`src-tauri/`)** owns all OS access. The webview never touches the FS, processes, or shells directly - everything goes through `invoke()` calls to commands registered in `src-tauri/src/lib.rs`:
 
-A plain `#[tauri::command] pub fn` runs inline on the main thread and freezes the UI for its whole duration. Anything that walks a tree, reads or copies a large file, or scans `/proc` is `#[tauri::command(async)]` (tokio pool, the fn stays sync so tests call it directly) or an `async fn` around `spawn_blocking`. Only keep a sync command when it is cheap and must stay ordered (`pty_write`, `pty_resize`, `history_suggest`). An `async fn` command never parks its worker on a blocking `recv()`; await `spawn_blocking` instead.
-
-- `pty::pty_*` - long-lived interactive PTY sessions (xterm ↔ portable-pty), managed by `PtyState` (`RwLock<HashMap<id, Session>>`). Output streams via a Tauri `Channel<PtyEvent>`.
-- `fs::tree::*` (`fs_read_dir`, `list_subdirs`), `fs::file::*` (`fs_read_file`, `fs_write_file`, `fs_stat`, `fs_canonicalize`), `fs::mutate::*` (`fs_create_file`, `fs_create_dir`, `fs_rename`, `fs_move`, `fs_delete`, `fs_delete_batch`): file explorer + editor IO.
-- `fs::search::*` (`fs_search`, `fs_list_files`), `fs::grep::*` (`fs_grep`, `fs_glob`): fuzzy file finder + content search (powered by `ignore` + `grep-*` crates).
-- `git::commands::*`: full source-control surface (`git_status`, `git_diff`, `git_diff_content`, `git_stage`, `git_unstage`, `git_discard`, `git_commit`, `git_fetch`, `git_pull_ff_only`, `git_push`, `git_log`, `git_show_commit`, `git_commit_files`, `git_commit_file_diff`, `git_panel_snapshot`, `git_resolve_repo`, `git_remote_url`). All gated through the workspace authorization registry.
-- `shell::shell_run_command`: one-shot subshell exec used by AI tools. Distinct from PTY sessions; not the user's interactive terminal. On Windows via PowerShell (`-NoProfile -Command`), on Unix via `$SHELL -lc`. Shared helper `build_oneshot_command`.
+- `pty::pty_*` - long-lived interactive PTY sessions (portable-pty ↔ Ghostty), managed by `PtyState` (`RwLock<HashMap<id, Session>>`). Output streams over the `terax-pty` multiplexed pull stream (hub thread, `pty_stream_open`, `pty_set_presentation`); input goes through a per-session writer thread.
+- `fs::tree::*` (`fs_read_dir`, `list_subdirs`), `fs::file::*` (`fs_read_file`, `fs_write_file`, `fs_stat`, `fs_canonicalize`), `fs::mutate::*` (`fs_create_file`, `fs_create_dir`, `fs_rename`, `fs_move`, `fs_delete`, `fs_delete_batch`), `fs::copy::fs_copy`, `fs::clipboard::fs_clipboard_paths`: file explorer + editor IO. File paste captures the workspace and root before clipboard IPC. AppKit and GTK clipboard requests run on the main thread; Windows clipboard retries and filesystem copies run on blocking workers. `fs_copy` requires an authorized root, stages each item and publishes with a no-replace rename, and returns `{ created, failed }` with paths in the caller’s workspace representation. Conflict renaming uses `name copy N` siblings. Symbolic links are preserved without traversing them; copying a folder into itself is rejected. Explorer refresh and pasted selection ignore completions from an obsolete workspace.
+- `fs::search::*` (`fs_search`, `fs_list_files`), `fs::grep::*` (`fs_grep`, `fs_grep_interactive`, `fs_glob`): fuzzy file finder + content search (powered by `ignore` + `grep-*` crates). File lists are cached per root in `fs::index` (packed buffer, at most two roots, 45 s TTL) and dropped by watcher events and our own mutations, so a keystroke ranks the cached list instead of re-walking the tree (a change reported during a cold walk marks that walk stale: its result is returned but not cached). Interactive searches bump a `fs::supersede` generation when the command is dispatched, so the walk of an older query stops while a newer one starts. Every command that touches the disk is `async` and runs on the blocking pool (`fs::blocking`): Tauri runs a plain command on the main thread, and the async runtime has two workers (`modules/runtime.rs`), so nothing blocking may run inline in an `async fn` either.
+- `git::commands::*`: full source-control surface (`git_status`, `git_diff`, `git_diff_content`, `git_stage`, `git_unstage`, `git_discard`, `git_commit`, `git_fetch`, `git_pull_ff_only`, `git_push`, `git_log`, `git_show_commit`, `git_commit_files`, `git_commit_file_diff`, `git_panel_snapshot`, `git_resolve_repo`, `git_remote_url`). All gated through the workspace authorization registry. `git_status` asks git for `--untracked-files=normal` (one `dir/` entry per untracked directory) and expands small untracked directories back into files with a bounded `git ls-files --others` (500 files and 16 directories per refresh, listing abandoned at a 256 KiB cap); a directory over budget stays collapsed as `dir/`, which stage and discard handle natively.
+- `git::commands_review::*` (review view, tasks and worktrees; pure cores in `git/diff.rs`, `git/patch.rs`, `git/refs.rs`, imperative parts in `review.rs`, `worktree.rs`, `checkpoint.rs`, `branch.rs`, `watch.rs`): `git_diff_summary` / `git_diff_file` / `git_merge_base` take a `GitDiffScope` (`uncommitted | staged | unstaged | range{base,head} | commit{sha} | checkpoint{from,to}`, a checkpoint end is a ref or the live worktree). Revisions are screened and resolved to ids before they reach an argument list, paths go through `resolve_within_repo` and `--literal-pathspecs`. Summaries come from one `diff --raw --numstat -z` (cap 4 MiB, `truncated`), untracked files are listed (2000) and line-counted under budgets (300 files / 1 MiB each / 16 MiB total, else `approximate`); a file diff is parsed into hunks with stable content ids (cap 2 MiB, `truncated`, complete hunks only) plus both full contents when each side is under 1 MiB (`contentsOmitted` says why not). `git_apply_hunks` re-diffs under the per-worktree lock (`plumbing::lock_for_repo`, the same one checkpoint create / restore / prune take), selects hunks (and optionally lines) by id, builds the patch with `patch::build_patch` and applies it with `git apply --recount`: stage is `--cached` against the unstaged diff, unstage is `--cached --reverse` against the staged diff, a revert of an unstaged hunk is `--reverse` on the working tree only (the index is untouched), and a revert in the uncommitted scope is `--index --reverse` (refused with `needsSeparateScopes` when the file also has unstaged edits). Whole-file operations (new, deleted, renamed, binary, untracked) use `git add -A` / `reset` / `restore` / `rm` / `clean` instead of a patch; stale ids, whole-file-only changes (added, deleted, renamed, binary, symlink, submodule, mode-only, end-of-file newline with line picks) and rejected patches come back as a structured `refusal`, never a half apply. Worktrees default to `~/.terax/worktrees/<project>-<hash>/<task>` (claimed atomically, collision-safe); each is authorized with `WorkspaceRegistry::authorize_derived(child, parent)` (revoked on remove/prune, and `git_worktree_list` re-grants only worktrees whose `.git` file points back into the repo); `include` globs copy ignored files (never overwrite, no symlinks, confined to both roots, budgeted; `*` stays inside one path component and only `**` crosses `/`, and a wildcard walk is limited to the pattern's depth and skips `.git` and dependency / cache trees). `git_worktree_remove` without `force` returns blockers (`dirty`, `unmerged`, `locked`, `ignored`: non-regenerable ignored files such as `.env`; dependency caches and files byte-identical to the main checkout's copy, e.g. unchanged `include` copies, do not count; `inconclusive`: a safety check timed out, failed or hit its output cap, named in `inconclusive`, so removal fails closed and only `force` goes on) instead of deleting, and removing a worktree whose directory is gone drops only that one administrative entry (never a repository-wide prune). Checkpoints (`refs/terax/checkpoints/<task>/<turn>`) are built from a seeded private `GIT_INDEX_FILE` (`add -A` + `write-tree` + `commit-tree`), so the real index, HEAD and files are untouched; vanished or unreadable files are retried/excluded and reported (`consistent`, `unstablePaths`, `limits`); every checkpoint commit carries the random id kept in the worktree's own git directory (`terax-worktree-id`; refs are shared by all worktrees of a repository, and the id survives renaming or moving the directory), and only that worktree may list, restore or prune it; restore refuses with the changed files when the worktree differs from the latest checkpoint, or from the tree the last restore wrote when that is newer (so restoring forward is not a change; making or pruning checkpoints clears that marker), unless forced, saves the working tree it is about to overwrite under `refs/terax/checkpoints/<task>/prerestore-<ms>` (returned as `safety`; restoring that ref undoes the restore) before touching anything, writes only differing paths, never touches ignored files and resets the index entries of touched paths to HEAD. Checkpoint plumbing runs with `core.fsmonitor=false`, `core.hooksPath` pointing at an empty directory in the git dir and `core.safecrlf=false`; file diffs force `a/` `b/` prefixes whatever `diff.mnemonicPrefix` / `diff.noprefix` say, and the git runner strips redirecting variables but keeps the user's `GIT_CEILING_DIRECTORIES`. A checkpoint scope's live worktree end can be pinned to the snapshot a summary returned (`{kind:"worktree", tree}`) so file diffs reuse it instead of re-walking the tree; diff output is capped at 20k lines (`truncated`). `git_watch` / `git_unwatch` (refcounted per repository under one lock together with the worker; `git_unwatch` takes the `repo` key `git_watch` returned and touches no repository, so it works after the worktree is removed; a touched directory costs a bounded number of stats and a burst of more than 64 directories is answered with one resync walk) register the non-ignored directories, git dir and refs with the shared `fs::watch` backend through a tap on its touched-directory stream and emit `terax:git-changed {repo, kinds}`; no subscriber means no worker, tap or OS watch; directories only another watcher registered (an ignored build tree) report nothing. The first push of a branch without upstream goes to `branch.<name>.pushRemote`, then `remote.pushDefault` (a configured name that is not a remote refuses instead of guessing), only then `origin` or the sole remote, as the full refspec `refs/heads/<b>:refs/heads/<b>`; `git_upstream_info` resolves the tracking ref through git's own `%(upstream)`, so a custom fetch refspec works. Checkpoints, `git_watch` and worktree creation/removal are not available for WSL workspaces yet (listing resolves paths through the workspace env).
+- `shell::shell_run_command`: one-shot subshell exec used by AI tools (bounded `proc::capture`: two short reader threads, no wait on pipes a backgrounded grandchild keeps open). Distinct from PTY sessions; not the user's interactive terminal. On Windows via PowerShell (`-NoProfile -Command`), on Unix via `$SHELL -lc`. Shared helper `build_oneshot_command`.
 - `shell::shell_session_*`: persistent agent shell with state across calls. `shell::shell_bg_*` (`spawn`, `logs`, `kill`, `list`): long-running background processes (dev servers etc.) with bounded ring-buffer log capture.
 - `workspace::*`: `workspace_authorize` / `workspace_current_dir` (the spawn/git/AI cwd authorization registry) plus the WSL bridge (`wsl_list_distros`, `wsl_default_distro`, `wsl_home`).
-- `lsp::*` (`lsp_detect`, `lsp_host_pid`, `lsp_resolve_root`, `lsp_spawn`, `lsp_send`, `lsp_kill`): language server process host. Dumb JSON-RPC pipe: Content-Length framing + process lifecycle in Rust (`lsp/framing.rs`, pure + tested; it compacts its buffer once per read, not once per frame), protocol intelligence on the frontend. Spawn cwd gated through the workspace registry; binaries resolve via the captured login-shell env (`lsp/env.rs`, GUI apps get a bare PATH on macOS); root detection walks up to markers but never to or above `$HOME`. Servers run in their own process group on Unix and are group-killed (cargo check / proc-macro children die with the server); Windows children get a `proc::job::ProcessJob` (kill-on-close, shared with pty). All sessions killed on `RunEvent::Exit`.
-- `net::*` (`ai_http_request`, `ai_http_stream`, `lm_ping`): AI HTTP proxy with SSRF guard; keeps provider calls and local-model pings off the webview.
+- `lsp::*` (`lsp_detect`, `lsp_host_pid`, `lsp_resolve_root`, `lsp_spawn`, `lsp_send`, `lsp_kill`): language server process host. Dumb JSON-RPC pipe: Content-Length framing + process lifecycle in Rust (`lsp/framing.rs`, pure + tested), protocol intelligence on the frontend. Spawn cwd gated through the workspace registry; binaries resolve via the captured login-shell env (`lsp/env.rs`, GUI apps get a bare PATH on macOS); root detection walks up to markers but never to or above `$HOME`. Servers run in their own process group on Unix and are group-killed (cargo check / proc-macro children die with the server); Windows children get a `proc::job::ProcessJob` (kill-on-close, shared with pty). All sessions killed on `RunEvent::Exit`.
+- `net::*` (`ai_http_stream`, `ai_http_cancel`, `ai_http_ack`, `lm_ping`): AI HTTP proxy with SSRF guard; keeps provider calls and local-model pings off the webview. Clients are cached per `(profile, host, pinned IPs, allow_private)` with a 90 s idle TTL and at most eight entries, so connections and HTTP/2 sessions are reused while DNS-rebinding protection stays per request. Classification (`net/ip.rs`) looks through IPv6 forms that carry an IPv4 destination (mapped, compatible, NAT64, 6to4, Teredo) and treats everything outside global unicast as non-public.
 - `secrets::secrets_*`: OS keychain via the `keyring` crate. Service constant `terax-ai`. Linux uses a file-based fallback gated behind `#[cfg(target_os = "linux")]`.
 - `open_settings_window`: separate webview window for Settings (optional `tab` arg deep-links a section).
 - `opener::open_external_url`: opens http/https/mailto/tel links. Used instead of the opener plugin's `openUrl` (frontend wrapper: `openUrl` in `src/lib/external-link.ts`), because the plugin's detached spawn leaves one unreaped child per link. Ours double-forks the same way and waits on the intermediate child. The plugin stays for `revealItemInDir`.
@@ -64,17 +372,17 @@ A plain `#[tauri::command] pub fn` runs inline on the main thread and freezes th
 PTY shells are bootstrapped via injected init scripts in `src-tauri/src/modules/pty/scripts/`:
 
 - **Unix** (`zshenv.zsh`, `zprofile.zsh`, `zlogin.zsh`, `zshrc.zsh`, `bashrc.bash`) for zsh/bash, plus `init.fish` installed to `~/.config/fish/conf.d/terax.fish` for fish. Emit OSC 7 (cwd) and OSC 133 A/B/C/D (prompt boundaries + exit code) so the host can track cwd and detect command boundaries without re-parsing the prompt. Fish 4.0+ writes its own OSC 133 prompt markers; Terax sets `fish_features=no-mark-prompt` and re-asserts its own prompt via `-C` to avoid doubling.
-- **Windows** (`profile.ps1`) - passed via `pwsh -NoLogo -NoExit -ExecutionPolicy Bypass -File <path>`. Wraps the user's existing `prompt` function (after their `$PROFILE` runs) to emit OSC 7 + OSC 133 A/B/D. Shell priority: `pwsh.exe` (PS 7+) → `powershell.exe` (PS 5.1) → `cmd.exe` (no integration). cwd is normalized to backslashes before being passed to ConPTY (`CreateProcessW` misbehaves with forward-slash cwd).
+- **Windows** (`profile.ps1`) - passed via `pwsh -NoLogo -NoExit -ExecutionPolicy Bypass -File <path>`. Wraps the user's existing `prompt` function (after their `$PROFILE` runs) to emit OSC 7 + OSC 133 A/B/D. Shell priority: `pwsh.exe` (PS 7+) → `powershell.exe` (PS 5.1) → `cmd.exe` (cwd only: the spawn sets `PROMPT` to emit OSC 7 from `$P` ahead of the user's prompt, `cmd_prompt` in `shell_init.rs`; the path keeps its backslashes and `parseOsc7` reads it literally, without percent-decoding, and normalizes it). cwd is normalized to backslashes before being passed to ConPTY (`CreateProcessW` misbehaves with forward-slash cwd).
 
-PTY output pacing (`pty/session.rs`, `flush_delay`): the first chunk after a quiet spell (12 ms) is flushed with zero added delay so keystroke echo is never held back; while output keeps streaming the flusher paces messages (3 ms, or 8 ms once a flush carried 16 KiB+) because every Tauri channel message costs a webview eval and, above 1 KiB, an extra fetch. The flusher blocks on its condvar with no timeout (`done` is only set under the pending lock), so an idle terminal costs zero wakeups. The reader pulls 64 KiB per `read` (the Linux pty buffer size). The DA filter and agent detector bulk-skip plain runs up to the next ESC; property tests lock that chunking and arbitrary bytes never change their output.
+zsh wrappers source the user's files with `ZDOTDIR` switched to their own directory (`TERAX_USER_ZDOTDIR` remembers a value their `.zshenv` sets) and keep it that way at the prompt, in hooks and widgets, so `$ZDOTDIR` loaders, `HISTFILE` and `.zlogin` behave as without Terax. Only a command line that starts a zsh (first word of a list or pipeline segment, after `exec` and its flags, `command`, `time`, `coproc`, `env` by name or path with `VAR=1`, `sudo` flags, an alias, `$SHELL`; only the first 512 characters and eight segments are inspected) gets Terax's directory exported in `preexec` (pure zsh word splitting, no forks) and the next precmd puts the user's value back, so a typed `vim $ZDOTDIR/.zshrc` finds their file, a script or `zsh -c` keeps the user's value, while `exec zsh`, a nested `zsh` and `zsh -l` read the integration scripts and the user's files once each (`su -` clears the environment and gets neither). The user's value travels in an exported `TERAX_USER_ZDOTDIR`. Our zsh code runs under `emulate -L zsh`, so KSH_ARRAYS and NO_UNSET cannot break it. The prompt end (OSC 133;B) goes after the prompt text in `PS1` and is also emitted from `zle-line-init`, because powerlevel10k rebuilds `PS1` in a precmd that runs after ours and redraws it asynchronously; a prompt that carries its own B is left alone. bash puts a last `PROMPT_COMMAND` entry (`_terax_finish_prompt`) behind every framework that rebuilds `PS1` (starship) so B follows the prompt text, keeps `PROMPT_COMMAND` arrays intact, returns the status it got so later entries see `$?`, and under ble.sh registers a `PRECMD` hook (`_terax_ble_precmd`) that stays silent while `PROMPT_COMMAND` still names the hook. Neither runs a command substitution per prompt (a fork is slow on MSYS). The prompt presentation gate (`PromptPresentationGate`) holds rendering from A to B for at most one second and learns: prompts that ended on the watchdog shorten it to 120 ms and then 16 ms until a B is seen again. `scripts/zshrc.test.py` and `bashrc.test.bash` drive real shells and run in CI.
 
-PTY teardown never waits on the reader without a deadline (`finished_within`, 500 ms): a background job that inherited the tty keeps the slave open, so EOF may never come. Past the deadline the waiter still flushes, signals exit and removes the session; the detached reader exits at its next read once `done` is set, releasing its master handles.
+Terminal colour queries (`OSC 4/10/11/12`, `CSI ? 996 n`, and `CSI ? 2031` scheme-change reports) are answered by `DaFilter` on the reader thread from the theme the page pushes at spawn and on every theme change (`pty_set_colors`, `terminal_colors.rs`), because a program that asks gives up after a short timeout and a late reply is echoed as text. A colour a program changed itself is left to the model that holds it.
 
 Linux main window (`modules/linux_window.rs`): the borderless window has an RGBA visual for the rounded corners, which makes GTK report no opaque region, so the compositor alpha-blends the whole surface every frame. We declare the interior (minus the 12px corners and 1px border, matching `#root` in `globals.css`) opaque on every size-allocate/style-update, and force WebKitGTK's hardware-acceleration policy to `Always` unless `WEBKIT_DISABLE_COMPOSITING_MODE` is set. If the `#root` radius or border changes, update the constants there.
 
 `pty/shell_init.rs` is split into `#[cfg(unix)]` / `#[cfg(windows)]` modules - keep new platform-specific code in the right cfg arm.
 
-ConPTY on Windows requires `SPAWN_LOCK` (Mutex) around `openpty + spawn_command` in `session.rs`. Concurrent spawns leave one of the resulting PTYs with a stalled output pipe. Don't remove the lock without verifying first-tab stability under fast tab spam.
+ConPTY on Windows requires `CONPTY_LIFECYCLE_LOCK` (Mutex) around `openpty + spawn_command` in `session.rs`. Concurrent spawns leave one of the resulting PTYs with a stalled output pipe. Don't remove the lock without verifying first-tab stability under fast tab spam. The lock must never be held across anything that waits on the frontend: the waiter lets the reader overdraft the output queue (`close_pseudoconsole`) before taking the lock for `ClosePseudoConsole`, so a backlog the page has not acknowledged cannot stall other `pty_open` calls.
 
 Each ConPTY child is also assigned to a per-session **Job Object** with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` (`pty/job.rs`). When the Job HANDLE drops - clean shutdown, panic, or even SIGKILL'd Terax process - the kernel kills every descendant of the shell (e.g. `npm run dev` spawned from inside pwsh). Without this Windows orphans the entire process subtree because `TerminateProcess` only kills the immediate child. macOS/Linux rely on `Drop for Session → killer.kill()`; on dev-`Ctrl-C` of `cargo run` destructors don't fire and orphans are possible there too - acceptable for now since dev only.
 
@@ -90,25 +398,26 @@ Single-window React app. Path alias `@/*` → `src/*`. Tabs are a tagged union (
 
 Each module is self-contained, exports a thin barrel via `index.ts`, and owns its hooks under `lib/`.
 
-- **terminal/** - `TerminalStack` keeps one mounted xterm per tab via `useTerminalSession` + `pty-bridge`. `osc-handlers.ts` parses OSC 7 (with Windows drive-letter normalization: `/C:/Users/foo` → `C:/Users/foo`) and OSC 133 markers. The xterm color palette is driven by the central theme engine (`modules/theme`), not a local table. Idle must cost nothing: no polling timers for things an event can signal (scroll listeners rebind via `onSlotBindingChange`, not an interval), no infinite CSS animations on persistent chrome (the running-task dot pulses 3 times then holds, since WebKitGTK repaints every frame while any animation runs), and polled state keeps its identity when unchanged (`reduceTerminalActivity`) so subscribers skip re-renders. The per-running-command `pty_activity` poll reads `/proc` directly on Linux (fd socket inodes matched against `/proc/net/tcp{,6}` LISTEN rows) instead of spawning `ss`, and never holds the session map lock during the scan. Per-write listeners must stay off React's render path: the fast scrollbar coalesces `onWriteParsed`/`onScroll` to one read per frame and bails when nothing changed, and `AutoSuggestAddon` defers its keystroke processing to a microtask so it never delays the PTY write. Renderer slots are pooled (`rendererPool.ts`, max 5): a hidden leaf with a foreground job (OSC 133 C..D, agent signal, or `pty_has_foreground_job`) keeps its live grid parked with rendering paused via `display:none`; an idle hidden leaf releases its slot but the buffer is retained and serialized lazily only when another leaf steals it. The `DormantRing` (1 MiB, no terminal reset on overflow) buffers bytes only for leaves whose slot was stolen or never bound. Never serialize a leaf that is mid-command: replaying incremental TUI repaints over a snapshot is what used to wipe Claude Code. The fast scrollbar compares what it would paint (`scrollPaint`, whole pixels), not raw scroll state, so a tail-following buffer that grows every line causes no React work; it unsubscribes while its pane is hidden, and handlers read live terminal state because the rendered view may lag. Persistence flushes skip unchanged terminals: each slot carries a `revision` bumped on parsed writes and resizes, and `snapshotStore` keeps a `SnapshotLedger` of the last revision written per leaf. Pool steals and reaps write snapshots through the same ledger, so an unchanged leaf is never rewritten. `applyTheme` skips slots that already hold an equal theme, the 2 s `pty_activity` poll never overlaps itself and pauses while the window is hidden, and tab icons select their own derived agent status (`useShallow`) instead of the whole phase map. WebGL context-loss recovery backs off (250 ms, 500 ms) and stops after 3 losses in 60 s (`webglRecovery.ts`), leaving the slot on the DOM renderer until the window clears.
-- **editor/** - CodeMirror 6 stack (`EditorStack` mirrors `TerminalStack`). `extensions.ts` configures language modes; supports vim mode. Buffers live in LF space and the original EOL (`lib/eol.ts`, majority-vote detection) is restored on save; indent unit/tab size are detected per file (`lib/indent.ts`) via a per-pane compartment. A watcher-driven reload stats the file first and skips the re-read when the mtime matches, since every save echoes back as `fs:changed`. `basicSetup` props are module constants: `@uiw/react-codemirror` reconfigures every extension whenever that prop changes identity. Saves are conflict-checked against the disk mtime returned by `fs_read_file`/`fs_write_file` (mismatch → warning toast with explicit Overwrite, never silent last-writer-wins); external format-on-save only applies the disk read-back if the doc is unchanged since the save snapshot. Files over 10 MB offer "Open anyway" (hard cap 50 MB, `force` arg); above 4 MB syntax highlighting and LSP stay off. Cmd-F routes to CodeMirror's own search panel (find/replace/regex) when an editor tab is active, Ctrl-G opens go-to-line; both panels styled in `chromeTheme.ts`. Format-on-save formatters live in `lib/externalFormat.ts` (`FORMATTERS` registry: biome, prettier, ruff, rustfmt, gofmt, clang-format, shfmt, zig fmt, plus a custom `{file}` command template); `resolveFormatter` applies per-language overrides (`editorFormatterByLang`) over the global default, and a global external default only runs on languages its tool understands. Diff panes resolve the language before mounting CodeMirror: a late compartment reconfigure leaves the merge view's deleted-chunk widgets unhighlighted. AI inline completion (`lib/autocomplete/`) sends the buffer's indent unit with the request and normalizes unambiguous tab/space mismatches in responses (`normalizeIndent.ts`); triggering is `autocompleteTrigger` auto or manual, with `editor.aiComplete` / `editor.codeComplete` registry shortcuts (guarded to editor tabs so the keys fall through to terminals), and Tab accepts an open completion popup before the ghost. Multi-line ghosts render first-line-inline plus a block widget below the line (never inline `<br>`s); a closers-only line-suffix (cursor inside `fn(|)`) is hidden and re-appended after the block so the preview equals the accept result, and a line-suffix with real code caps the ghost to one line (`capToLineSuffix`). Suggestions echoing the recent prefix are dropped, multi-line suggestions and closing brackets never start on a line that ends with `;`, and closer-only lines are reindented from the previous line (`trimSuggestion`/`reindentClosers`, all tested). Markdown editing is GFM (`markdownLanguage` base) with fenced-code highlighting resolved through the shared lazy language registry, Cmd/Ctrl+Click URLs, and clickable task checkboxes (`markdownExtras.ts`, all inside the lazy markdown chunk; the eager-budget test enforces this). Dotenv files (`.env`, `.env.*`, and `*.env`) use the lazy shell grammar. Editor theme is decoupled from the app theme: the `editorTheme` pref is `"auto" | EditorThemeId` (default `"auto"`), resolved at render time by `useEditorThemeExt` via `resolveEditorThemeId`. In `auto` the editor follows the active app theme's `editorTheme[mode]` pairing (live, never stale); an explicit pick overrides. Theme ids + labels live in `settings/store.ts` (`EDITOR_THEMES`/`EDITOR_THEME_LABELS`); the matching extensions in `editor/lib/themes.ts` (`EDITOR_THEME_EXT`). Prebuilt `@uiw` themes plus locally-built ones in `editor/lib/cmThemes.ts` (Kanagawa wave/lotus/dragon, Everforest, Dracula, Solarized, Catppuccin, Rosé Pine) via `createTheme` (no extra deps). The three CM surfaces (`EditorPane`, `AiDiffPane`, `GitDiffPane`) all read the theme through `useEditorThemeExt`.
+- **terminal/** - `TerminalStack` keeps live leaves mounted. `useGhosttyTerminalSession` owns one persistent model and PTY per leaf; GPU/WebGL surfaces lease shared presentation resources independently. `terminalSessionApi.ts` exposes renderer-neutral product actions. OSC 7 paths and OSC 52 payloads are validated by pure parsers; Ghostty supplies OSC 133 events and native command anchors to the lazy block controller; OSC 133;A carries a parser-time tracked pin, so a command ended by the next prompt, with no D, ends at that prompt even after reflow or later output in the same write. Breadcrumb commands require a tracked idle prompt; unintegrated shells and Bash before 4.4 cannot safely accept injected commands because builtins can read stdin without a foreground child. WebGPU can fail over to WebGL without replacing the model, PTY, selection, search, or block history. Hidden models keep parsing through bounded PTY transport while presentation is released. There is no snapshot replay or second terminal parser. Theme colors come from the central theme engine.
+- **editor/** - CodeMirror 6 stack (`EditorStack` mirrors `TerminalStack`). `extensions.ts` configures language modes; supports vim mode. Buffers live in LF space and the original EOL (`lib/eol.ts`, majority-vote detection) is restored on save; indent unit/tab size are detected per file (`lib/indent.ts`) via a per-pane compartment. Saves are conflict-checked against the disk mtime returned by `fs_read_file`/`fs_write_file` (mismatch → warning toast with explicit Overwrite, never silent last-writer-wins); external format-on-save only applies the disk read-back if the doc is unchanged since the save snapshot. Files over 10 MB offer "Open anyway" (hard cap 50 MB, `force` arg); above 4 MB syntax highlighting and LSP stay off. Cmd-F routes to CodeMirror's own search panel (find/replace/regex) when an editor tab is active, Ctrl-G opens go-to-line; both panels styled in `chromeTheme.ts`. Format-on-save formatters live in `lib/externalFormat.ts` (`FORMATTERS` registry: biome, prettier, ruff, rustfmt, gofmt, clang-format, shfmt, zig fmt, plus a custom `{file}` command template); `resolveFormatter` applies per-language overrides (`editorFormatterByLang`) over the global default, and a global external default only runs on languages its tool understands. Diff panes resolve the language before mounting CodeMirror: a late compartment reconfigure leaves the merge view's deleted-chunk widgets unhighlighted. AI inline completion (`lib/autocomplete/`) sends the buffer's indent unit with the request and normalizes unambiguous tab/space mismatches in responses (`normalizeIndent.ts`); triggering is `autocompleteTrigger` auto or manual, with `editor.aiComplete` / `editor.codeComplete` registry shortcuts (guarded to editor tabs so the keys fall through to terminals), and Tab accepts an open completion popup before the ghost. Multi-line ghosts render first-line-inline plus a block widget below the line (never inline `<br>`s); a closers-only line-suffix (cursor inside `fn(|)`) is hidden and re-appended after the block so the preview equals the accept result, and a line-suffix with real code caps the ghost to one line (`capToLineSuffix`). Suggestions echoing the recent prefix are dropped, multi-line suggestions and closing brackets never start on a line that ends with `;`, and closer-only lines are reindented from the previous line (`trimSuggestion`/`reindentClosers`, all tested). Markdown editing is GFM (`markdownLanguage` base) with fenced-code highlighting resolved through the shared lazy language registry, Cmd/Ctrl+Click URLs, and clickable task checkboxes (`markdownExtras.ts`, all inside the lazy markdown chunk; the eager-budget test enforces this). Dotenv files (`.env`, `.env.*`, and `*.env`) use the lazy shell grammar. Editor theme is decoupled from the app theme: the `editorTheme` pref is `"auto" | EditorThemeId` (default `"auto"`), resolved at render time by `useEditorThemeExt` via `resolveEditorThemeId`. In `auto` the editor follows the active app theme's `editorTheme[mode]` pairing (live, never stale); an explicit pick overrides. Theme ids + labels live in `settings/store.ts` (`EDITOR_THEMES`/`EDITOR_THEME_LABELS`); the matching extensions in `editor/lib/themes.ts` (`EDITOR_THEME_EXT`). Prebuilt `@uiw` themes plus locally-built ones in `editor/lib/cmThemes.ts` (Kanagawa wave/lotus/dragon, Everforest, Dracula, Solarized, Catppuccin, Rosé Pine) via `createTheme` (no extra deps). The three CM surfaces (`EditorPane`, `AiDiffPane`, `GitDiffPane`) all read the theme through `useEditorThemeExt`.
   Editor code size is stored separately as `editorFontSize` and does not affect `terminalFontSize`.
-- **explorer/** - file tree with Material/Catppuccin icons (`iconResolver.ts`), fuzzy search, keyboard nav, inline rename, context actions. Backslash-aware `basename`.
+- **explorer/** - file tree with Catppuccin icons, fuzzy search, keyboard nav, inline rename, context actions. Backslash-aware `basename`. Icons are lazy: `iconResolver.ts` is the startup-safe shell and fetches the ~360 kB set (`iconEngine.ts`) when the first `FileIcon`/`FolderIcon` mounts; until then those components render a same-size blank slot that fades the icon in, and the set is never in either window's startup graph. The tree stays mounted when the sidebar collapses but is `visible={false}`: no native fs watchers (`watchRegistry.ts` disarms them), no `fs:changed` subscription, no drop listener and no reloads; showing it re-registers the watchers and reloads loaded directories once.
 - **preview/** - auto-detected dev-server preview tab (status-bar pill suggests opening when a localhost URL is detected).
 - **tabs/** - `useTabs` is the source of truth for tab list + active id. `useWorkspaceCwd` derives explorer root + inherited cwd for new tabs from active tab. `basename` splits on both `/` and `\`.
 - **header/** - top bar + inline search (`SearchInline` adapts to terminal vs editor via `SearchTarget`). `WindowControls` rendered when `USE_CUSTOM_WINDOW_CONTROLS` is true (Linux + Windows; macOS uses native traffic lights).
 - **statusbar/** - bottom bar, `CwdBreadcrumb` (handles Unix paths, Windows drive letters, and home `~` segments via `pathUtils.segmentsFromCwd`), AI tools indicator.
-- **shortcuts/** - keymap registry (`shortcuts.ts`) + `useGlobalShortcuts`. Handlers live in `App.tsx` and are passed in by id (`tab.new`, `ai.toggle`, …). `metaKey || ctrlKey` for cross-platform Cmd/Ctrl.
-- **settings/** - settings store (`store.ts` via `tauri-plugin-store`), preferences hook, settings window opener.
+- **shortcuts/** - keymap registry (`shortcuts.ts`) + `useGlobalShortcuts`. Handlers live in `App.tsx` and are passed in by id (`tab.new`, `ai.toggle`, …). Defaults live in `shortcutDefaults.ts`, one table per platform family, and mean the same thing wherever focus is. macOS uses Command. On Windows/Linux no default is a plain Ctrl chord that is a control byte (Ctrl+P/R/E/W/D/F/G/[/]/- belong to the shell), an Alt chord (Meta bindings), a function key or Ctrl+Alt+character (AltGr); app commands use Ctrl+Shift+<key> (Jump to tab is Ctrl+Shift+1 to 9, matched by physical key), Ctrl+, and Ctrl+=. Editor shortcuts keep plain Ctrl chords because the host only runs them in editor tabs. `shortcutDefaults.test.ts` audits both tables (unique chords, no terminal-program, OS or CodeMirror-keymap chord); every on-screen hint comes from `useShortcutHint`, never a literal.
+- **settings/** - settings store (`store.ts` via `tauri-plugin-store`), preferences hook, settings window opener. The Settings window is closed (not hidden, so its WebContent process is released) when it hands a theme edit to the main window; `open_settings_window` rebuilds it on demand.
 - **sidebar/** - activity bar + collapsible side panels (explorer, source control, git history).
-- **source-control/** - git status / stage / commit panel and diff workflow. `useSourceControl` runs at the App root, so its state keeps identity when a refresh finds nothing new (`sameSourceControl.ts`), and focus or cwd-triggered refreshes pass `background: true` so they do not flip `isLoading`.
+- **source-control/** - git status / stage / commit panel and diff workflow. `useSourceControl` takes a `live` flag (`statusConsumers.ts`): `git status` runs on window focus and context changes only while the Source Control panel, a git tab or the explorer's git decorations are on screen. Otherwise nothing runs, a snapshot for another repository is dropped (never a wrong badge), and the next consumer to appear refreshes it. The rail badge alone is not a consumer; it refreshes lazily.
+- **git/** - the only place that talks to the git IPC commands: `types.ts` (mirrors the Rust serde output), `api.ts` (`git.*` typed wrappers carrying the workspace env), and pure helpers with tests: `scope.ts` (scope labels, keys, liveness, which hunk actions a scope allows), `hunks.ts` (immutable hunk/line selection model and the `toApplySelection` payload), `changes.ts` (`subscribeGitChanges`: one shared `terax:git-changed` listener, per-repo routing and kind filters, backend watch released with the last subscriber).
 - **git-history/** - commit graph rail, refs, per-commit file diffs.
 - **lsp/** - opt-in language server support, zero cost until enabled (no process, no PATH check, nothing in the eager bundle beyond a 14.5 kB shell). Statusbar pill offers Enable (binary found) or Install (with copyable command) per language; activation persists as `lspActivation` in the settings store (`enabled`/`dismissed`/unset). `sessionManager.ts` keys sessions by (server, workspace root), refcounts open docs, idle-kills after 3 min, and crash-backoffs (cooldown before respawn; 3 in 5 min → give up + toast with the server's stderr tail). Resource invariants: **no root marker → no session** (a dirname fallback once spawned a server per directory and burned GBs), hard cap of 4 sessions per server, lean per-preset `initializationOptions` (rust-analyzer: `cachePriming` off + bounded `lru`; tsls: `maxTsServerMemory`). Client is `codemirror-languageserver` behind a lazy import, subclassed (`lib/client.ts`) to add didClose/didSave/shutdown, `textDocument/references` (Shift-F12; multi-result definitions and references share the `locationsPanel.ts` picker) and the publishDiagnostics capability the lib forgets (tsls sends no diagnostics without it); `lib/transport.ts` bridges to the Rust pipe and answers server-to-client requests the lib ignores. `vscode-languageserver-protocol` is aliased to a 4-enum shim in vite.config.ts (~117 kB saved). Presets: typescript, rust-analyzer, pyright, ruff, gopls and more; custom stdio servers via Settings. Several presets can claim one language (pyright and ruff both take `py`): `serverForLanguage` prefers the enabled candidate, so enabling ruff while pyright is unset or dismissed routes Python to ruff. WSL workspaces excluded for now.
 - **markdown/** - markdown preview renderer (backs the `markdown` tab kind).
 - **workspace/** - workspace environment switching (Local + WSL distros).
 - **theme/** - custom theme engine (no `next-themes`). `ThemeProvider` + `applyTheme` write CSS variables; built-in presets in `themes/` (terax-default - colours live in `globals.css` since ThemeProvider clears rather than applies for that id - xcode, claude, kanagawa, kanagawa-dragon, tokyo-night, catppuccin, rose-pine, everforest, nord, gruvbox, dracula, solarized, tide, sage, caffeine), each optionally declaring an `editorTheme` pairing consumed by `resolveEditorThemeId` (see editor/). User themes via `customThemes.ts` + `validateTheme.ts`, optional background image via `bgImageStore.ts` + `SurfaceLayer`. A static background with blur is blurred once in JS on a 512 px copy (`theme/lib/blurMath.ts`, three box passes) and shown with no CSS `filter`, since a live filter on the full-window top layer costs a blur pass on every composited frame; any failure falls back to the CSS filter.
 - **updater/** - auto-updater UI built on `tauri-plugin-updater`.
-- **agents/** - agent launching, notifications, and management for both the built-in Terax agent and terminal coding agents (Claude Code, Codex, Gemini CLI, Pi, OpenCode, Grok). The header launcher (`components/AgentLauncherPanel.tsx` + `lib/launcher.ts`) persists per-agent start commands in preferences and atomically builds balanced one-to-four-pane tabs. Shared store (`store/agentStore.ts`: terminal `sessions` + `localAgent` + `notifications`) and a shared router (`lib/route.ts`: suppress when focused-and-visible, OS-notify when unfocused, in-app Sonner toast when focused-but-hidden) feed the header `NotificationBell` (management surface, Terax agent listed first, per-agent hook enable rows). Toasts use Sonner (`components/ui/sonner.tsx`) themed via the central engine; `lib/agentIcon.tsx` renders the per-agent brand mark. Terminal detection is Rust-side (`pty/agent_detect.rs`) on the PTY reader's byte filter, armed on `OSC 133;C;<cmd>` or self-armed by the marker, emitting `terax:agent-signal` transitions (`started`/`working`/`attention`/`finished`/`exited`) driven only by OSC sequences (never raw output, so a repainting TUI never flaps) - zero cost when no agent runs. Hook-backed terminal agents converge on the same `OSC 777` marker the detector reads, installed via `agent_enable_hooks(agent)` / `agent_hooks_status(agent)` in `modules/agent.rs` (data-driven `AgentSpec` for JSON-hook agents plus a Terax-owned Pi extension; atomic writes, foreign configuration preserved, idempotent; gated on `TERAX_TERMINAL`). OpenCode and Grok use OSC 133 process-lifecycle detection but do not install attention hooks. Delivery differs because only Claude's hook protocol can return terminal bytes in the hook *response*: **Claude** (`~/.claude/settings.json`, `UserPromptSubmit`/`Notification`/`Stop`) returns the marker via the `terminalSequence` field (legacy 3-field `notify;Terax;<event>`). **Codex** (`~/.codex/hooks.json`, `UserPromptSubmit`/`PermissionRequest`/`Stop`) and **Gemini** (`~/.gemini/settings.json`, `BeforeAgent`/`Notification`/`AfterAgent`, `matcher:"*"`) can't, so the hook *command* emits the 4-field `notify;Terax;<agent>;<event>` marker itself (`printf > /dev/tty` on Unix, or `terax __terax_notify` writing to `CONOUT$` after `AttachConsole` on Windows) and prints `{}` as a JSON stdout no-op (Codex's `Stop` and Gemini both reject empty/non-JSON stdout). **Pi** (`~/.pi/agent/extensions/terax-notifications.ts`) uses `agent_start`/`agent_settled` extension events and writes its named marker directly to stdout. The agent-named marker lets a self-arm name the right agent when no preexec fired (bash/tmux/Windows). The Terax agent path is `ai/components/LocalAgentNotificationsBridge.tsx`, mapping `chatStore.agentMeta` (`awaiting-approval`→attention, busy→idle→finished, `error`) into the same router.
+- **agents/** - agent launching, notifications, and management for both the built-in Terax agent and terminal coding agents (Claude Code, Codex, Gemini CLI, Pi, OpenCode, Grok). The header launcher (`components/AgentLauncherPanel.tsx` + `lib/launcher.ts`) persists per-agent start commands in preferences and atomically builds balanced one-to-four-pane tabs. Shared store (`store/agentStore.ts`: terminal `sessions` + `localAgent` + `notifications`) and a shared router (`lib/route.ts`: suppress when focused-and-visible, OS-notify when unfocused, in-app Sonner toast when focused-but-hidden) feed the header `NotificationBell` (management surface, Terax agent listed first, per-agent hook enable rows). Toasts use Sonner (`components/ui/sonner.tsx`) themed via the central engine; `lib/agentIcon.tsx` renders the per-agent brand mark. Terminal detection is Rust-side (`pty/agent_detect.rs`) on the PTY reader's byte filter, armed on `OSC 133;C;<cmd>` (Windows launcher forms `.exe`/`.cmd`/`.ps1`, quoted paths and the call operator included) or self-armed by a structured hook, emitting `terax:agent-signal` transitions (`started`/`working`/`attention`/`finished`/`exited`) driven only by OSC sequences (never raw output, so a repainting TUI never flaps) - zero cost when no agent runs. The same filter reports BEL and OSC 9/99/777 from any program that is not a known agent as `terax:terminal-notification` (`ptyId`, `title?`, `body`, `kind`), at most five per ten seconds per terminal with identical repeats dropped. Hook-backed terminal agents deliver structured events instead of terminal bytes: the installed hook runs `terax hook <agent> <event>` through `$TERAX_CLI` (`modules/agent.rs`: a per-dialect command for POSIX shells, cmd and PowerShell, no interpolated input; Claude Code `~/.claude/settings.json`, Codex `~/.codex/hooks.json`, Gemini CLI `~/.gemini/settings.json`, and a Terax-owned Pi extension that spawns the CLI), the CLI reads the hook JSON from stdin, trims it, and sends the control `hook` method with the caller's `TERAX_PANE_ID`. `modules/agent_events.rs` authenticates it, requires the pane to belong to a live PTY, normalizes it with the typed adapters in `terax-control-protocol::hook` and emits `terax:agent-event` (session id, transcript path, cwd, message, tool, permission, subagent) while keeping the legacy `terax:agent-signal` stream in step through the shared `AgentLink`; once an agent is hooked its OSC 9/777 hints and bells are ignored, and process lifecycle still comes from OSC 133. Claude Code and Codex `PermissionRequest` hooks can wait for the Terax UI (`agent_decisions_ready`, `agent_decision_respond`, `AgentDecision` in `modules/control/agents.ts`) and receive the agent's own allow/deny JSON; with no UI subscriber, an ended request, a closed pane or an agent that went away the hook falls through to the agent's prompt. Installs are lifecycle-only (session start, prompt, permission request, notification, stop, session end) until something consumes tool events: one declarative table per agent in `modules/agent.rs` marks each supported event wanted or not, per-tool-call hooks are off, and an install removes Terax groups for events that are no longer wanted. Installs splice into the existing file text (`modules/agent_json.rs`), so comments, ordering and indentation survive; `agent_hooks_plan` returns before and after for a diff preview, `agent_hooks_apply` refuses a file changed since, and `agent_disable_hooks` removes only Terax's groups. `src/modules/agents/model/` is the pure reducer from these events to agent states and is not wired to UI yet. OpenCode and Grok use OSC 133 process-lifecycle detection but do not install hooks. Hooks installed by older versions (OSC markers, `__terax_notify`) are recognised and migrated. The Terax agent path is `ai/components/LocalAgentNotificationsBridge.tsx`, mapping `chatStore.agentMeta` (`awaiting-approval`→attention, busy→idle→finished, `error`) into the same router.
 - **command-palette/** - modal command palette (`CommandPalette.tsx`, `commands.ts`) for actions and navigation.
 - **spaces/** - workspace spaces/projects (name, root, env, color, per-space tab persistence) via `useSpaces` and `SpaceSwitcher`.
 - **ai/** - see below.
@@ -120,8 +429,9 @@ BYOK. Cloud providers via `@ai-sdk/*`: **OpenAI, Anthropic, Google, xAI, Cerebra
 - **Key storage**: OS keychain via `keyring` (Rust). Frontend reads/writes through `secrets_*` commands. Service `KEYRING_SERVICE = "terax-ai"`. Never persist keys to disk, settings store, or `localStorage`.
 - **Agent** (`lib/agent.ts`): `Experimental_Agent` with `stopWhen: stepCountIs(MAX_AGENT_STEPS)` and the system prompt from `config.ts`. Provider branching happens here - keep the `Agent` / `DirectChatTransport` shape; the rest of the system depends on AI SDK v6 chat semantics.
 - **Sub-agents** (`agents/registry.ts`, `agents/runSubagent.ts`): named sub-agents with their own system prompts and tool subsets, invoked by the main agent via `run_subagent` tool.
-- **Sessions** (`lib/sessions.ts` + `store/chatStore.ts`): conversations are organized into named sessions, persisted via `tauri-plugin-store` at `terax-ai-sessions.json` (list + `activeId` + per-session `messages:<id>` keys). `chatStore.ts` keeps a module-scoped `Map<sessionId, Chat<UIMessage>>`; `getOrCreateChat(apiKey, sessionId)` lazily constructs a `Chat`, seeded with messages from a hydration map populated by `hydrateSessions()` (called once from `App.tsx`). `AgentRunBridge` mirrors active-session messages to disk on every change and auto-derives titles from the first user message. Switching the API key wipes the chat map; sessions persist.
+- **Sessions** (`lib/sessions.ts` + `store/chatStore.ts`): conversations are organized into named sessions. `terax-ai-sessions.json` retains only metadata and `activeId`; message arrays live in atomically replaced `conversations/session-<id>.json` files owned by Rust. Messages cross IPC as raw JSON bytes (validated by a streaming pass, never rebuilt as a document tree); every save flushes the new file (plain `fsync`) before the rename and keeps the replaced version as `session-<id>.json.bak`; mid-stream saves are scheduled at most every 2 s and at least every 4 s, while turn end, session switch and window close save durably (full flush, `F_FULLFSYNC` on Apple, plus a directory sync). A queued write for a session is replaced by a newer one, and a damaged file is set aside as `session-<id>.json.corrupt` and the load falls back to the `.bak` before the conversation reads as empty, so one bad conversation never breaks the rest. Legacy migration is per session: it removes a legacy key only after its message file is safe, never overwrites a newer file on retry, skips and reports a failing key, and deletes `terax-ai-sessions.before-message-files.json` once every conversation that copy holds, not only the ids the caller lists, reads back as a valid file (a leftover copy older than seven days with nothing to migrate is pruned at startup, and deleting a session scrubs it from the copy). Window close flushes with a timeout and never traps: a failed flush shows a "Close anyway" error once. Per-session queues and a native I/O gate serialize storage operations across page reloads; failed latest writes remain retryable, and window close flushes pending storage. `chatStore.ts` keeps a module-scoped `Map<sessionId, Chat<UIMessage>>`; `getOrCreateChat(sessionId)` lazily constructs a `Chat`, seeded with messages from a hydration map populated by `hydrateSessions()` (called once from `App.tsx`). `AgentRunBridge` mirrors active-session messages to disk on every change and auto-derives titles from the first user message. Switching the API key wipes the chat map; sessions persist.
 - **Composer** (`lib/composer.tsx`): React context providing shared input state (text, attachments, voice) for both the docked `AiInputBar` and any other surface. Attachments include image, text-file, and `selection` kinds - selections come from `useChatStore.attachSelection(text, source)` (drained into chips, not pasted into the textarea) and are wrapped as `<selection source="terminal|editor">…</selection>` blocks at submit. Composer derives `isBusy` from `agentMeta.status` so it can mount safely before sessions hydrate.
+- **AI HTTP transport**: binary request bodies and response packets avoid JSON byte arrays. Native requests are owned by their calling window, explicitly cancelled on abort, page reload, or window destruction, and bounded to 16 concurrent requests. A 128 KiB byte window (at most 256 packets) carries at most 64 KiB per packet and coalesces ready network chunks; the webview acknowledges validated cumulative byte boundaries once half a window has arrived, so small SSE chunks cost no per-chunk IPC, and a consumer that grants no credit for two minutes is abandoned and its request cancelled. The frontend consumer queue is capped at 192 KiB, request bodies at 64 MiB, and request metadata at 64 KiB. Consumer cancellation during startup is repeated after native registration completes. SSRF validation and DNS pinning remain in Rust.
 - **Voice input**: streamed transcription pipeline. Toggled from the composer.
 - **Live context bridge**: `App.tsx` calls `setLive({ getCwd, getTerminalContext, … })` so tools can read the *currently active* terminal's cwd + last 300 lines of buffer. Lazy by design - don't pre-snapshot.
 - **Tools** (`tools/tools.ts`): `read_file`, `list_directory`, `fs_search`, `fs_grep` auto-execute. `write_file`, `create_directory`, `rename`, `delete`, `run_command`, `shell_session_run`, `shell_bg_spawn` set `needsApproval: true` and the AI SDK pauses for an in-UI confirmation card. Auto-send after approval uses `lastAssistantMessageIsCompleteWithApprovalResponses`. `lib/security.ts` is a deny-list refusing obvious secret paths (`.env*`, `.ssh/`, credentials, keychain dirs) - apply on **both** read and write paths and don't bypass it.
@@ -134,16 +444,22 @@ BYOK. Cloud providers via `@ai-sdk/*`: **OpenAI, Anthropic, Google, xAI, Cerebra
 - **AI Elements** (Vercel) live in `src/components/ai-elements/` from the `@ai-elements` registry in `components.json`. Same rule: regenerate, don't hand-patch - composition wrappers belong in `modules/ai/components/`.
 - **Tailwind v4** - no `tailwind.config.*`, config is in `src/App.css` via `@theme`. Use `cn()` from `@/lib/utils`.
 - Animation: `motion` (Framer Motion successor). Resizable layout: `react-resizable-panels`.
-- **Window vibrancy**: the `windowVibrancy` pref drives `WindowVibrancyBridge` (main window only - `window_set_backdrop` targets its caller). `html[data-vibrancy="on"]` makes `<html>`/`<body>` transparent and redefines `--frame` with alpha, so only the chrome frosts; panes keep `--background` so terminal text stays on a solid surface and the xterm canvas still matches its container. The opaque colour the pre-paint script parks on `<html>` would cover the backdrop, so `applyVibrancy` clears it while the effect is on; there is deliberately no localStorage fast path, since pre-declaring the effect would show a see-through window on any launch where the native call has not landed yet. Repeat applications are deduped, and only Mica is rebuilt on a light/dark flip (NSVisualEffectView adapts on its own).
-- **Floating panes**: header and status bar are window chrome painted on `--frame` (derived from `--card`, so no theme declares it); the sidebar and the tab surface are `.terax-pane` cards on `--background` - same tone as the xterm canvas. Panes meet the chrome flush and are inset only horizontally, because the header centers its content and any vertical gutter would stack onto that padding and read as asymmetric. `.terax-pane` carries no drop shadow: `react-resizable-panels` clips panel content at the panel box, so a shadow would only render on the gutter sides.
+- **Animation cost**: nothing animates forever at display rate. Tailwind `animate-spin`/`animate-pulse` are redefined in `globals.css` with `steps()` (12 and ~4 fps), the text shimmer uses 40 steps per sweep, recording indicators use `.terax-blink`, a pending tool approval uses the finite `.terax-attention-pulse`, and persisted history (`bash_background`) never animates. `modules/theme/windowActivity.ts` sets `html[data-window-inactive]` while the window is unfocused, hidden or occluded (DOM focus, document visibility and the terminal's shared native presentation feed, no extra native listener); that attribute pauses every CSS animation and an animated background image freezes on a still frame (`surfaceFrame.ts`). `prefers-reduced-motion` still removes the rest.
+- **Compositing budget**: every composited layer costs a backing store, and WebKit allocates a new one per window-resize step for each layer that follows the window. At rest the shell has three layers with contents (page tile, terminal canvas, the terminal's hidden textarea); everything else is clip layers without backing. Do not add `will-change`, 3D transforms (`translateZ`, `transform-gpu`), `backdrop-filter`/`backdrop-blur` or blur filters to anything mounted by default; popovers, HUDs and chips use an opaque `bg-popover`/`bg-card` instead of a translucent blurred one. Only the allowlist in `src/styles/compositingBudget.test.ts` (modal scrims, the background-image overlay, ...) may, each with a reason. A static background image gets no layer (`surfaceOwnsLayer`). While a window drag is live, `html[data-live-resize]` (`modules/theme/livePageResize`, macOS only) gives the document an invisible size rounded up to 512 px so WebKit keeps one page tile size across the drag instead of one per step (`docs/architecture/app-lab.md`, "Compositing layers").
+- **Startup graph**: neither window may preload the AI SDK, zod, Streamdown, CodeMirror or the icon set. `vite.config.ts` splits chunks with two prioritised `codeSplitting` groups (eager `react`/`radix`/`ghostty-vt` outrank lazy features, because a lazy chunk's recursive dependency capture once swallowed React's CJS entry and made the eager `react` chunk import every AI provider). `src/app/dist-budget.test.ts` builds into a temp dir with sourcemaps and fails if any forbidden package or chunk is reachable from `index.html`/`settings.html`; `pnpm check:dist` runs the same check on `dist/`. `eager-budget.test.ts` keeps the source-graph check.
+- **One copy per package**: `src/app/dist-budget.test.ts` also fails when any npm package is bundled in two versions (the AI SDK providers each pin their own `provider-utils`, `codemirror-languageserver` pins `marked`); pin one with a scoped override in `pnpm-workspace.yaml`. `zod/v3` is aliased to a one-enum shim (`modules/ai/lib/zodV3Shim.ts`): the AI SDK only reads `ZodFirstPartyTypeKind` from it and Terax builds its schemas with zod 4.
+- **Primary terminal chunk** (`.size-limit.json`, what every window loads): keep it to the first terminal's hot path. Rarely used code loads on first use and `eager-budget.test.ts` locks it out of the session import graph: the sextant, octant and legacy-computing glyphs (`gpu/builtin/lazyGlyphs.ts` loads `legacyComputing.ts`; until it arrives those cells draw blank and its arrival bumps `symbolFontEpoch`, which rebuilds every atlas like the icon face), the search engine (`search/GhosttySearchController.ts` is the thin controller each surface owns and imports `GhosttySearchEngine.ts` on the first find) and the release diagnostics (`sessionDiagnostics.ts`).
+- **Long AI chats**: messages older than the newest two get `content-visibility: auto` with an estimated `contain-intrinsic-size` (`messageHeightEstimate.ts`), so layout and paint cost tracks what is near the viewport.
+- **Window vibrancy**: the `windowVibrancy` pref drives `WindowVibrancyBridge` (main window only - `window_set_backdrop` targets its caller). `html[data-vibrancy="on"]` (off by default; an explicitly stored choice always wins) makes `<html>`/`<body>` transparent and redefines `--frame` with alpha, so only the chrome frosts; panes keep `--background` so terminal text stays on a solid surface and the terminal canvas still matches its container. The opaque colour the pre-paint script parks on `<html>` would cover the backdrop, so `applyVibrancy` clears it while the effect is on; there is deliberately no localStorage fast path, since pre-declaring the effect would show a see-through window on any launch where the native call has not landed yet. Repeat applications are deduped, and only Mica is rebuilt on a light/dark flip (NSVisualEffectView adapts on its own).
+- **Floating panes**: header and status bar are window chrome painted on `--frame` (derived from `--card`, so no theme declares it); the sidebar and the tab surface are `.terax-pane` cards on `--background` - same tone as the terminal canvas. Panes meet the chrome flush and are inset only horizontally, because the header centers its content and any vertical gutter would stack onto that padding and read as asymmetric. `.terax-pane` carries no drop shadow: `react-resizable-panels` clips panel content at the panel box, so a shadow would only render on the gutter sides.
 - Path imports: always `@/…`, never relative across modules.
 - Cross-platform paths: anywhere a path may originate from OSC 7, the explorer, or the OS, normalize separators with `.split(/[\\/]/)` rather than `.split("/")`.
 - Canonical path form on the frontend is **forward-slash**. `homeDir()` returns backslashes on Windows; convert at the boundary (App.tsx setHome). OSC 7 already arrives as forward-slash. Equal canonical strings keep `useFileTree` from wiping its tree and flashing the explorer when `tab.cwd` first arrives.
 
 ### Window styling
 
-- macOS: `titleBarStyle: Overlay` + `hiddenTitle: true` in `tauri.conf.json` (native traffic lights via overlay). `transparent: true` + `macOSPrivateApi: true` in `tauri.conf.json` are what `NSVisualEffectView` requires; that also means the macOS build uses a private API and is not App Store eligible.
-- Linux: `decorations: false` + `transparent: true` from `tauri.linux.conf.json`; re-asserted post-realize for GNOME/Mutter CSD.
+- macOS: `titleBarStyle: Overlay` + `hiddenTitle: true` in `tauri.conf.json` (native traffic lights via overlay). The main window is created opaque, because a non-opaque `NSWindow` makes WindowServer blend every terminal frame. `window_set_backdrop` makes the window and its `WKWebView` (`drawsBackground`) see-through only while vibrancy is on, and paints the opaque window with the theme's frame colour otherwise. `macOSPrivateApi: true` stays for that `WKWebView` key and the private `NSVisualEffectView` hosting, so the macOS build uses a private API and is not App Store eligible.
+- Linux: `decorations: false` + `transparent: true` from `tauri.linux.conf.json`; re-asserted post-realize for GNOME/Mutter CSD. Windows and Linux stay transparent from creation because the borderless chrome paints its own rounded corners.
 - Windows: same as Linux via `tauri.windows.conf.json`. React renders custom `WindowControls`.
 
 ### Tauri capabilities
@@ -162,16 +478,33 @@ BYOK. Cloud providers via `@ai-sdk/*`: **OpenAI, Anthropic, Google, xAI, Cerebra
 ### Bundle config
 
 - `bundle.targets: "all"` plus per-platform sections in `tauri.conf.json`:
-  - **macOS**: `minimumSystemVersion: 10.15`.
+  - **macOS**: `minimumSystemVersion: 13.0`.
   - **Linux**: deb depends `libwebkit2gtk-4.1-0`, `libgtk-3-0`; rpm `webkit2gtk4.1`, `gtk3`; AppImage bundles its media framework.
-  - **Windows**: NSIS installer in `currentUser` mode (no admin required), WebView2 via `embedBootstrapper` (offline install).
+  - **Windows**: NSIS installer in `currentUser` mode (no admin required), WebView2 via `downloadBootstrapper`. Installing a missing WebView2 runtime requires internet access; there is no bundled offline runtime. Packaged and offline-install validation remains in the release-readiness gates.
 - Auto-updater configured with a public minisign key; release artifacts at `https://github.com/raja2102598/terax-ai/releases/latest/download/latest.json`.
+- `bundle.resources` includes the upstream Ghostty, Restty, ghostty-web, and xterm.js license notices under `licenses/terminal/`. Repository documentation and test-only reference WASM cores are not packaged; the frontend includes only the adapted SIMD and scalar cores.
 
 ### Known gotchas
 
-- **React 19 strict mode** double-mounts `useEffect` in dev → terminals spawn twice on first render. The first PTY is cleaned up almost immediately. The `SPAWN_LOCK` mutex serializes this; don't be alarmed by `pty opened id=1` followed by `pty closed id=1` in dev logs.
+- **Syntax highlighting identity**: parsers and editor themes must use the same `@lezer/highlight` instance. The pinned workspace catalog and override keep them aligned; update the catalog version to upgrade all consumers together. Duplicate copies silently hide token styles even when parsing succeeds. Language highlighting tests exercise every editor theme and chat code blocks; the built-output check also requires one highlighter module.
+- **React 19 strict mode** double-mounts `useEffect` in dev → terminals spawn twice on first render. The first PTY is cleaned up almost immediately. The `CONPTY_LIFECYCLE_LOCK` mutex serializes this; don't be alarmed by `pty opened id=1` followed by `pty closed id=1` in dev logs.
 - **Windows PowerShell process lifecycle**: `killer.kill()` from `portable-pty` only kills the immediate child. Descendants (e.g. `npm run dev` started inside pwsh) survive unless something else takes them down. The Job Object in `pty/job.rs` handles this for the Terax-process-death case; an explicit `pty_close` from JS also kills only the immediate child + relies on the Job to take the rest. Don't disable the Job without a replacement.
 - **Tab `cwd` storage**: comes from OSC 7 with forward slashes (after `parseOsc7` strips `/C:` → `C:`). Anything that consumes `tab.cwd` and passes it to a Rust fs command on Windows must normalize separators or accept both forms - `apply_common` in `pty::shell_init` handles this for PTY spawn; other call sites must do their own.
+
+## Fork additions
+
+This repository is a fork of `crynta/terax-ai`. Upstream owns the terminal (Ghostty model, renderers, PTY transport); fork code hooks in at a few named points so an upstream merge stays mechanical. Keep new fork code in its own files and touch upstream files by the line.
+
+- **Terminal activity** (`terminal/lib/activity.ts`, `activityMonitor.ts`, Rust `pty/activity.rs`): the tab bar shows the running process, runtime and first listening port, and a finished command in an unwatched pane raises a toast or OS notification (`planFinishedNotice`). Driven only by OSC 133 events through one `observeTerminalActivity` call in `useGhosttyTerminalSession`'s `onEvent`, never per output chunk. The `pty_activity` poll (2 s) exists only while a command runs, never overlaps itself, pauses while the window is hidden, reads `/proc` directly on Linux and never holds the session map lock during the scan. The store keeps snapshot identity when nothing changed (`reduceTerminalActivity`).
+- **Scrollback actions** (`terminal/lib/scrollbackActions.ts`): copy full scrollback, jump to top or live output, copy or select the current command block. They read the model on demand (`ghosttyModelForLeaf`, `GhosttyBlocks.currentBlockId` / `selectById`); nothing subscribes to output. Shortcut ids `terminal.copyFull`, `terminal.scrollTop`, `terminal.scrollBottom`, `blocks.copyOutput`, `blocks.selectOutput`; the scroll jumps are disabled outside terminal tabs, which is why they may share Ctrl+Shift+Home/End with the editor.
+- **Tabs**: `tabWidth` preference (`default` / `compact` / `narrow`); narrow also hides the process name and timer. `tabs/lib/runtime.ts` formats the timer and schedules one timeout per visible change instead of a 1 s interval.
+- **Data viewers**: `.csv` and `.parquet` files open in `CsvPane` / `ParquetPane` (`fs::csv_reader`, `fs::parquet_reader`); `fs::mutate::fs_extract` unpacks `.zip`, `.tar.gz` and `.tgz` next to the archive and reports the change to the file index. Images and other media use upstream's asset-grant path in `EditorPane`.
+- **Source control identity** (`source-control/sameSourceControl.ts`): `useSourceControl` runs at the App root, so its state keeps identity when a refresh finds nothing new, and the window-focus refresh passes `background: true` so it does not flip `isLoading`.
+- **Editor**: a watcher-driven reload stats the file first and skips the re-read when the mtime matches, since every save echoes back as a change event. `basicSetup` props are module constants: `@uiw/react-codemirror` reconfigures every extension whenever that prop changes identity.
+- **Background blur** (`theme/lib/blurMath.ts`, `useBlurredBackground.ts`): a static background with blur is blurred once in JS on a 512 px copy and shown with no CSS `filter`, so it also needs no layer of its own (`surfaceOwnsLayer`); any failure falls back to the CSS filter.
+- **Release**: Linux x86_64 only (`release.yml`), updater endpoint and signing key of this fork (`tauri.conf.json`).
+
+Not carried over from the xterm.js era, because they were built on xterm APIs the Ghostty model does not have: the fast scrollbar overlay with its transcript menu, inline history suggestions in plain terminals with the Suggestions settings page, and scrollback restore across restarts (the model exposes text, not a styled serialization).
 
 ## Further reading
 
@@ -180,7 +513,8 @@ Long-form contributor guides live under `docs/`. These guides elaborate on `TERA
 - `docs/README.md` - index of contributor guides
 - `docs/architecture/two-process-model.md` - IPC boundary and command reference
 - `docs/architecture/pty-shell-integration.md` - PTY, shell init scripts, OSC, ConPTY, Job Object
+- `docs/architecture/pty-transport-v2.md` - multiplexed PTY output stream: hub, wire format, presentation classes, credit; `scripts/pty-smoke/` drives it in a real debug app (`python3 scripts/pty-smoke/run.py`)
 - `docs/architecture/security-model.md` - consolidated security model and boundaries
 - `docs/architecture/ai-subsystem.md` - AI stack, sessions, tools, adding a provider
-- `docs/architecture/terminal-renderer-pool.md` - renderer pool and DormantRing invariants
+- `docs/architecture/terminal-renderer-pool.md` - model ownership and presentation pool invariants
 - `docs/contributing/testing.md` - testing contract and core-subsystem invariants

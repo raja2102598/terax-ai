@@ -3,7 +3,11 @@ import { create } from "zustand";
 
 export type AgentPhase = "working" | "attention" | "finished" | "idle";
 
-type AgentSignal = { id: number; kind: string; agent?: string | null };
+type AgentSignal = {
+  id: number;
+  kind: string;
+  agent?: string | null;
+};
 
 type AgentActivityStore = {
   phases: Record<number, AgentPhase>;
@@ -61,8 +65,12 @@ function clearFinishedTimer(id: number): void {
   }
 }
 
-let onExited: ((ptyId: number) => void) | null = null;
-let bound = false;
+let listenerReady: Promise<void> | null = null;
+
+export function clearAgentActivity(id: number): void {
+  clearFinishedTimer(id);
+  useAgentActivityStore.getState().clear(id);
+}
 
 /** Maps a raw detector signal to the phase it drives, `"exited"` to drop the
  * pty, or `null` to ignore. Pure so the mapping stays unit-testable. */
@@ -84,39 +92,69 @@ export function phaseForSignal(
   }
 }
 
+type AgentSignalHandler = (signal: AgentSignal) => void;
+const signalHandlers = new Set<AgentSignalHandler>();
+
+/**
+ * Subscribes to every raw detector signal through the single shared native
+ * `terax:agent-signal` listener (the activity store has already applied the
+ * signal when handlers run). One listener serves the tab icons and the
+ * notification bridge instead of one IPC subscription each.
+ */
+export function subscribeAgentSignals(handler: AgentSignalHandler): () => void {
+  signalHandlers.add(handler);
+  void ensureAgentActivityListener().catch(() => {});
+  return () => {
+    signalHandlers.delete(handler);
+  };
+}
+
+function applySignal(payload: AgentSignal): void {
+  const { id, agent } = payload;
+  const action = phaseForSignal(payload.kind);
+  if (action === null) return;
+  clearFinishedTimer(id);
+  const store = useAgentActivityStore.getState();
+  if (action === "exited") {
+    store.clear(id);
+    return;
+  }
+  // The agent name only rides the `started` signal (incl. self-arm).
+  if (agent) store.setAgent(id, agent);
+  store.setPhase(id, action);
+  if (action === "finished") {
+    finishedTimers.set(
+      id,
+      setTimeout(() => {
+        finishedTimers.delete(id);
+        const s = useAgentActivityStore.getState();
+        if (s.phases[id] === "finished") s.setPhase(id, "idle");
+      }, FINISHED_TTL_MS),
+    );
+  }
+}
+
 // The Rust detector arms via the Claude Code / Codex / Gemini OSC 777 marker and
 // reports per-pty lifecycle: started, working, attention, finished, exited.
-export function ensureAgentActivityListener(
-  exited: (ptyId: number) => void,
-): void {
-  onExited = exited;
-  if (bound || typeof window === "undefined") return;
-  bound = true;
-  void listen<AgentSignal>("terax:agent-signal", (e) => {
-    const { id, agent } = e.payload;
-    const action = phaseForSignal(e.payload.kind);
-    if (action === null) return;
-    clearFinishedTimer(id);
-    const store = useAgentActivityStore.getState();
-    if (action === "exited") {
-      store.clear(id);
-      onExited?.(id);
-      return;
+export function ensureAgentActivityListener(): Promise<void> {
+  if (listenerReady) return listenerReady;
+  listenerReady = listen<AgentSignal>("terax:agent-signal", (e) => {
+    applySignal(e.payload);
+    for (const handler of signalHandlers) {
+      try {
+        handler(e.payload);
+      } catch (error) {
+        console.error("[terax] agent signal handler failed:", error);
+      }
     }
-    // The agent name only rides the `started` signal (incl. self-arm).
-    if (agent) store.setAgent(id, agent);
-    store.setPhase(id, action);
-    if (action === "finished") {
-      finishedTimers.set(
-        id,
-        setTimeout(() => {
-          finishedTimers.delete(id);
-          const s = useAgentActivityStore.getState();
-          if (s.phases[id] === "finished") s.setPhase(id, "idle");
-        }, FINISHED_TTL_MS),
-      );
-    }
-  });
+  }).then(
+    () => {},
+    (error: unknown) => {
+      listenerReady = null;
+      throw error;
+    },
+  );
+  return listenerReady;
 }
 
 export function isAgentActivePty(ptyId: number): boolean {

@@ -1,0 +1,192 @@
+# Terminal visual harness
+
+Draws a fixed test pattern (ASCII, box drawing, bold and italic, every underline
+style, strikethrough, overline, faint, blink, inverse, wide CJK, emoji, combining
+marks, selection, search, cursor styles) through the real terminal surface and
+the real Ghostty model, and reads the presented canvas back as exact RGBA.
+Use it to compare renderer changes pixel for pixel and to check geometry at
+display ratios the machine does not have.
+
+## Compositor scaling regression
+
+```sh
+pnpm exec playwright install chromium --no-shell
+pnpm test:terminal-scaling
+```
+
+This runs full headless Chromium at native display scale **and** Playwright
+`deviceScaleFactor` 1, 1.25, 1.5 and 2. DPR emulation alone leaves Chromium's
+native `devicePixelContentBoxSize` at scale 1 and introduces screenshot scaling
+artifacts; the gate checks that the native device box equals the backing store.
+`CHROME_PATH` can select an existing executable, or `CHROME_CHANNEL=chrome` an
+installed Chrome. The macOS terminal CI job caches the full Chromium build pinned
+by Playwright and sets `TERAX_VISUAL_SOFTWARE=1` to use SwiftShader for both
+renderers without requiring a hardware GPU.
+
+The same fixed glyph/stem pattern goes through WebGL and WebGPU. Each screenshot
+is compared against its renderer's raw texture, and the two raw textures are
+compared against each other. The gate allows at most 1/255 per RGB channel and
+zero pixels above that tolerance. It tests an odd CSS origin (11, 21) and a
+fractional origin (10.25, 20.25), including movement without a backing resize.
+Raw readbacks alone cannot detect a compositor blur. Captures and `scaling.json`
+are written to `TERAX_VISUAL_OUT` or a temporary directory printed by the runner.
+`TERAX_VISUAL_SOURCE_ROOT` runs this gate against an older source tree too.
+
+The #1357 reproduction at origin (11, 21), 1001 × 641 CSS px, on macOS Chromium:
+
+| DPR | Compared pixels | WebGPU differing pixels before → after | WebGL before → after |
+| --- | ---: | ---: | ---: |
+| 1 | 570,000 | 0 → 0 | 0 → 0 |
+| 1.25 | 891,000 | 70,765 → 0 | 0 → 0 |
+| 1.5 | 1,282,500 | 89,530 → 0 | 0 → 0 |
+| 2 | 2,280,000 | 0 → 0 | 0 → 0 |
+
+The backing already had CSS size `backing / DPR`, both renderers' raw glyph pixels
+matched, and glyphs/cells/viewports were integer device pixels with unfiltered
+atlas loads. The shared WebGPU canvas alone used a fractional CSS `translate()`
+to snap its origin. Chromium resampled its already snapped canvas layer during
+that transform. Applying the same offset with layout `left`/`top` avoids the
+second sampling. The allocation policy and WebKit's existing CSS-size fallback
+remain unchanged.
+
+On Windows, select WebGPU and open a terminal at 125% and 150% display scaling.
+In a packaged build, first run
+`localStorage.setItem("terax:terminal-diagnostics", "1")` in DevTools and reload
+the window to install the diagnostics. Then call `window.__teraxTerm().renderer`
+twice, allowing a frame between calls. The
+first call schedules a one-shot native box measurement; after a resize or display
+change, call twice again. Check:
+
+- `devicePixelRatio`: `1.25` or `1.5` at 100% webview zoom.
+- `canvases[0].backingSize`, `cssDeviceSize`, and `devicePixelContentBoxSize`:
+  identical integer width/height pairs. `cssDeviceSize` is `cssSize × DPR` rounded
+  to native pixels (CSS layout can quantize the fractional CSS size slightly).
+- `backingMatchesCss` and `backingMatchesDevicePixelBox`: both `true`.
+- `devicePixelContentBoxStatus`: `"available"`; `transform`: `"none"`.
+
+Compare text with WebGL, resize, split panes, and move the window between displays.
+WebKit reports `"unsupported"` and `null` for its missing native box; its CSS/backing
+match must still be `true`. Diagnostics live in the lazy diagnostics graph and
+do no work until requested.
+
+```sh
+TERAX_VISUAL_OUT=/tmp/visual TERAX_VISUAL_PORT=5199 \
+  node_modules/.bin/vite --config scripts/terminal-visual/vite.config.ts
+```
+
+Open `http://localhost:5199/?w=1000&h=640&fs=15&select=19,5,21,14&capture=name`.
+With `capture`, the page writes `name.rgba` (raw RGBA) and `name.json` (size,
+ratio, surface diagnostics) to `TERAX_VISUAL_OUT` and sets its title to
+`captured name`. To compare another revision, extract it
+(`git archive <rev> src packages package.json tsconfig.json | tar -x -C dir`,
+link `node_modules`), start a second server with
+`TERAX_VISUAL_SOURCE_ROOT=dir` and another port, and load the same URL.
+
+```sh
+node scripts/terminal-visual/compare.mjs diff /tmp/visual a b diff.png
+node scripts/terminal-visual/compare.mjs png /tmp/visual a 4 0 0 200 80
+node scripts/terminal-visual/compare.mjs crisp /tmp/visual a
+```
+
+Query parameters: `dpr` (override the display ratio), `w` `h` `left` `top` (host
+box, CSS px), `fs` `ff` `lh` `ls` (font size, family, line height, letter
+spacing), `cursor` (`block`, `bar`, `underline`), `blink`, `select` (`row,col,row,col[,1]`
+for rectangular), `search`, `pattern=empty`, `pattern=sprites`, `pattern=colors|icons|cursor` (see below),
+`renderer=webgl` (captures work there too: the harness keeps the WebGL drawing
+buffer and reads it with `readPixels`), `maxtex` (cap the
+atlas texture size to force eviction), `stress=1|2` (page through thousands of
+glyphs first; 2 waits for each page), `bench=spinner|rewrite|stream&ticks=N`
+(main-thread time per tick, see below), `raf=native`.
+
+Frames are driven by timers by default because a pane that is not on screen
+never fires `requestAnimationFrame`. A hidden pane may also throttle timers, so
+long runs are slow there. `window.harness` exposes the surface, model,
+`capture(name)`, `swapTo("webgl" | "webgpu")` (renderer failover on one model),
+`runtime()` (runtime diagnostics) and `window.__setDpr(ratio)` (change the ratio
+live).
+
+`bench` drives `prepareFrame` and `encode` (into an offscreen target) directly, without the scheduler, after a warm-up,
+and reports milliseconds per tick (model write, frame and submit) in batches
+because `performance.now()` is coarse. Both revisions must share one cell
+geometry (for example `fs=15` at ratio 2) for the comparison to be fair.
+
+## Procedural glyph pattern
+
+`pattern=sprites` draws box-drawing, block, braille, powerline and legacy
+computing characters (nested boxes, a table with every junction, a Claude-Code
+style input box, progress bars with eighth blocks, braille spinner frames, a
+powerline prompt, bold and italic copies of the same borders, a few text labels)
+as colour runs from `spritePattern.ts`. With `capture=name` the page also writes `name.check.json`
+from `spriteCheck.ts`:
+
+- `seams`: for every cell boundary where two line characters point at each other,
+  the last pixel column (row) of one cell is compared with the first of the next.
+  Both must be inked on exactly the same pixels. It needs only the image, so it
+  also measures a revision that draws these characters from the font.
+- `expected`: every cell holding a procedural glyph or a space is compared with
+  the frame the generator predicts (`background + (foreground - background) *
+  coverage`). Present only where `gpu/BuiltinGlyphs.ts` exists.
+
+```sh
+open "http://localhost:5199/?pattern=sprites&w=1000&h=780&fs=15&dpr=1.25&capture=sprites-dpr1.25"
+```
+
+Use `h=780` or more so the pattern is not scrolled. Compare against a revision
+that draws these characters from the font by serving it with
+`TERAX_VISUAL_SOURCE_ROOT` as described above.
+
+## Colours, icons and the block cursor
+
+`pattern=colors` draws ANSI 16, indexed 256 and truecolor foregrounds (plus bold ANSI), `pattern=icons`
+draws private-use icons (Powerline, Devicons, Codicons, Font Awesome, Material Design), CJK, Hangul,
+emoji, ZWJ sequences, flags and skin tones, each followed by blank cells, and `pattern=cursor` parks the
+cursor on a letter (`cursorAt=letter`), a wide character (`wide`) or coloured text (`colored`) in the
+`cursor` style. The page checks its own capture (`glyphCheck.ts`) and writes `<name>.check.json`; the
+check reads pixels only, so it runs on both renderers:
+
+- colors: every sample leans toward its expected colour and none collapsed to the default foreground
+- icons: every glyph draws; an icon never reaches left of its cell or past two cells; a Powerline Extra
+  (U+E0C0..E0CD, two cells) or separator (U+E0D6, U+E0D7) fills its cell box exactly, ink touching all four
+  edges and nothing outside, so neighbours join without a seam; wide glyphs stay in two cells
+- cursor: a block recolours the character in the cursor text colour and covers both cells of a wide
+  character; bar and underline leave it alone
+
+The auto-capture of a page that was just navigated to can stall in a background pane, so drive it from the
+page: `await harness.capture(name); await harness.glyphCheck(name)`.
+
+```sh
+node scripts/terminal-visual/compare.mjs check /tmp/visual colors-gpu-125 icons-gl-125 cursor-wide-gpu-150
+node scripts/terminal-visual/compare.mjs parity /tmp/visual icons-gl-125 icons-gpu-125
+```
+
+`parity` requires a `renderer=webgl` and a WebGPU capture of one pattern at one ratio to match pixel for
+pixel. Run both over `dpr=1`, `1.25`, `1.5` and `2`, and again with
+`localStorage["terax:terminal-text-contrast"] = "on"`: both renderers apply the same curve.
+
+## Window canvas and split panes
+
+Every WebGPU pane draws into the one canvas of the window's terminal area, so the harness
+page marks `#stage` as `[data-terminal-area]` (`aw`, `ah` set its size in CSS pixels, default
+1600x1000, so a hidden browser pane still lays out) and a capture reads the whole canvas
+texture, then keeps the pane's grid area, which is what its own canvas held before: captures
+of the single-pane page are byte-identical to the per-pane canvas revision (`fresh1000` at
+ratios 2 and 1.25, 0 pixels different).
+
+`grid.html` runs R x C real surfaces in one window with DOM dividers between them, every
+pane showing the same pattern (coloured edge cells with overhanging italic glyphs, text
+inside), and `compare.mjs grid` checks a split capture against a single-pane capture of the
+same pane size:
+
+```sh
+# exact=1 sizes each pane to a whole number of cells (cols x rows), so glyph overhang
+# reaches the scissor edge; without it panes are equal shares of w x h and carry slack
+open "http://localhost:5199/grid.html?grid=1x1&exact=1&cols=40&rows=12&dpr=2&capture=single-d2"
+open "http://localhost:5199/grid.html?grid=2x2&exact=1&cols=40&rows=12&dpr=2&gap=1&capture=split-d2"
+node scripts/terminal-visual/compare.mjs grid /tmp/visual split-d2 single-d2
+```
+
+It requires every pane's grid area to equal the single pane byte for byte (no bleed across
+the scissor edges), every pixel outside the grid areas to be the clear colour, the
+canvas rectangle of each pane to equal its DOM box snapped to device pixels, and the
+dividers to abut the panes on both sides. `left` and `top` shift the grid by fractions of a
+pixel to exercise the origin snapping.
